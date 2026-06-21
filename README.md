@@ -1,11 +1,14 @@
 # otelhouse
 
-OpenTelemetry span exporter for [ClickHouse](https://clickhouse.com/).
+OpenTelemetry span and metric exporter for [ClickHouse](https://clickhouse.com/).
 
 Spans are stored in a single `otel_traces` table partitioned by day, with
 [MergeTree](https://clickhouse.com/docs/en/engines/table-engines/mergetree-family/mergetree)
-ordering and a 180-day TTL.  The schema intentionally mirrors the one used by
-the [OpenTelemetry Collector ClickHouse exporter](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/exporter/clickhouseexporter)
+ordering and a 180-day TTL.  Metrics land in five `otel_metrics_*` tables —
+`gauge`, `sum`, `histogram`, `exponential_histogram` and `summary` — that
+share the same MergeTree layout and retention.  Both schemas intentionally
+mirror the ones used by the
+[OpenTelemetry Collector ClickHouse exporter](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/exporter/clickhouseexporter)
 so Grafana dashboards built for that exporter work here too.
 
 ## Quick start
@@ -27,11 +30,36 @@ tp := sdktrace.NewTracerProvider(
 )
 ```
 
+## Metrics
+
+```go
+mexp, err := otelhouse.NewMetricExporter(ctx, otelhouse.MetricConfig{
+    DSN: "clickhouse://localhost:9000/default",
+})
+if err != nil { ... }
+defer mexp.Shutdown(ctx)
+
+if err := mexp.CreateSchema(ctx); err != nil { ... }
+
+mp := sdkmetric.NewMeterProvider(
+    sdkmetric.WithReader(sdkmetric.NewPeriodicReader(mexp)),
+    sdkmetric.WithResource(res),
+)
+```
+
+`NewMetricExporter` is an
+[OTel SDK `metric.Exporter`](https://pkg.go.dev/go.opentelemetry.io/otel/sdk/metric#Exporter):
+combine it with a `PeriodicReader` for production, or a `ManualReader` plus
+`reader.Collect` for tests.  Each `Export` call fans data points to the
+matching `otel_metrics_<gauge|sum|histogram|exponential_histogram|summary>`
+table.
+
 ## Testing with Dagger's own OTel data
 
-The integration test (`TestExporter_DaggerLikeTrace`) creates spans that mirror
+The integration tests (`TestExporter_DaggerLikeTrace`,
+`TestMetricExporter_DaggerLikeMetrics`) create spans and metrics that mirror
 the attributes Dagger emits (`dagger.op`, `dagger.cached`, `dagger.cmd`) and
-verifies they land in ClickHouse.
+verify they land in ClickHouse.
 
 To feed real Dagger pipeline traces into the exporter, point Dagger at an OTLP
 receiver backed by `otelhouse`:
