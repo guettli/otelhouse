@@ -21,19 +21,12 @@ jobs:
     name: ci
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Cache ci module deps
-        uses: actions/cache@v4
-        with:
-          path: ~/go/pkg/mod
-          key: go-ci-${{ hashFiles('ci/go.sum') }}
-          restore-keys: go-ci-
-
       - name: Run Dagger pipeline
-        run: cd ci && go run .
+        run: go run ./ci/
