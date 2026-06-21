@@ -32,10 +32,16 @@ func pipeline(ctx context.Context) error {
 	goBuild := client.CacheVolume("otelhouse-go-build")
 
 	// ClickHouse service used for integration tests.
+	// Credentials are set explicitly because the image's entrypoint generates
+	// a random password for the default user when no CLICKHOUSE_* env vars are
+	// provided, which makes the empty-password DSN fail with auth errors.
 	// Dagger's OTel traces can also be forwarded here by setting
 	// OTEL_EXPORTER_OTLP_ENDPOINT to a receiver backed by the otelhouse exporter.
 	clickhouse := client.Container().
 		From("clickhouse/clickhouse-server:25.5").
+		WithEnvVariable("CLICKHOUSE_USER", "test").
+		WithEnvVariable("CLICKHOUSE_PASSWORD", "test").
+		WithEnvVariable("CLICKHOUSE_DB", "test").
 		WithExposedPort(9000).
 		WithExposedPort(8123).
 		AsService()
@@ -80,7 +86,7 @@ func pipeline(ctx context.Context) error {
 	// own OTel output into ClickHouse via the exporter under test.
 	if _, err = goBase.
 		WithServiceBinding("clickhouse", clickhouse).
-		WithEnvVariable("CLICKHOUSE_DSN", "clickhouse://default:@clickhouse:9000/default").
+		WithEnvVariable("CLICKHOUSE_DSN", "clickhouse://test:test@clickhouse:9000/test").
 		WithExec([]string{"go", "test", "-v", "-count=1", "./..."}).
 		Sync(ctx); err != nil {
 		return fmt.Errorf("go test: %w", err)
