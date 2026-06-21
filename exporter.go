@@ -27,11 +27,17 @@ type Config struct {
 	Table string
 }
 
+// applyDefaults fills zero-valued Config fields with their defaults.
+// Pure: no I/O, safe to call from unit tests.
+func (c *Config) applyDefaults() {
+	if c.Table == "" {
+		c.Table = "otel_traces"
+	}
+}
+
 // New opens a ClickHouse connection and returns a ready-to-use Exporter.
 func New(ctx context.Context, cfg Config) (*Exporter, error) {
-	if cfg.Table == "" {
-		cfg.Table = "otel_traces"
-	}
+	cfg.applyDefaults()
 	opts, err := clickhouse.ParseDSN(cfg.DSN)
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn: %w", err)
