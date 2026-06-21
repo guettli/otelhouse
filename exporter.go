@@ -41,7 +41,7 @@ func New(ctx context.Context, cfg Config) (*Exporter, error) {
 		return nil, fmt.Errorf("open: %w", err)
 	}
 	if err := conn.Ping(ctx); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("ping: %w", err)
 	}
 	return &Exporter{conn: conn, table: cfg.Table}, nil

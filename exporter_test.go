@@ -57,7 +57,11 @@ func TestExporter_DaggerLikeTrace(t *testing.T) {
 		sdktrace.WithSyncer(exp),
 		sdktrace.WithResource(res),
 	)
-	t.Cleanup(func() { tp.Shutdown(ctx) })
+	t.Cleanup(func() {
+		if err := tp.Shutdown(ctx); err != nil {
+			t.Errorf("TracerProvider.Shutdown: %v", err)
+		}
+	})
 
 	tracer := tp.Tracer("dagger/engine", trace.WithInstrumentationVersion("0.15.0"))
 
