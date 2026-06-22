@@ -95,7 +95,10 @@ func TestServer_RoundTrip(t *testing.T) {
 
 	tracer := tp.Tracer("dagger/engine")
 	ctxRun, root := tracer.Start(ctx, "do",
-		trace.WithAttributes(attribute.String("dagger.op", "do")),
+		trace.WithAttributes(
+			attribute.String("dagger.op", "do"),
+			attribute.String("dagger.cmd", "dagger call test"),
+		),
 	)
 	rootSC := root.SpanContext()
 	_, child := tracer.Start(ctxRun, "build",
@@ -181,6 +184,18 @@ func TestServer_RoundTrip(t *testing.T) {
 		}
 		if got.DurationNs <= 0 {
 			t.Errorf("DurationNs = %d, want > 0", got.DurationNs)
+		}
+		if got.Command != "dagger call test" {
+			t.Errorf("Command = %q, want %q", got.Command, "dagger call test")
+		}
+		// StatusCode is "Unset" for unended-error spans, but the root here
+		// finished normally — accept the OK/Unset variants the OTel SDK
+		// produces and that ClickHouse stores verbatim.
+		switch got.StatusCode {
+		case "STATUS_CODE_UNSET", "Unset", "STATUS_CODE_OK", "Ok":
+			// ok
+		default:
+			t.Errorf("StatusCode = %q, want Unset/Ok variant", got.StatusCode)
 		}
 	})
 

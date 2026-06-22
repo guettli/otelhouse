@@ -151,6 +151,12 @@ func applyConnOptions(opts *clickhouse.Options, dial, read time.Duration, maxOpe
 }
 
 // Run represents one Dagger pipeline run grouped by TraceId.
+//
+// StatusCode and Command are derived from the trace's root span (the one
+// whose ParentSpanId is empty or all zeros). They are surfaced on /api/runs
+// so the dashboard can render a status column and the invoked command
+// without fetching each trace individually. Both fields are empty when no
+// root span is present in the table (e.g. partial ingestion).
 type Run struct {
 	TraceID            string            `json:"trace_id"`
 	ServiceName        string            `json:"service_name"`
@@ -158,6 +164,8 @@ type Run struct {
 	EndTime            time.Time         `json:"end_time"`
 	DurationNs         int64             `json:"duration_ns"`
 	SpanCount          uint64            `json:"span_count"`
+	StatusCode         string            `json:"status_code"`
+	Command            string            `json:"command"`
 	ResourceAttributes map[string]string `json:"resource_attributes"`
 }
 
