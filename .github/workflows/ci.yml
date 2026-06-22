@@ -45,14 +45,22 @@ jobs:
           key: dagger-engine-${{ env.DAGGER_ENGINE_VERSION }}
 
       # Pre-pull (or restore from cache) the Dagger engine image so transient
-      # registry.dagger.io timeouts don't fail the entire run. A cache hit
-      # avoids the registry entirely; a cache miss retries the pull with
-      # exponential backoff (up to ~4 minutes of waiting across 6 attempts).
+      # registry.dagger.io timeouts don't fail the entire run.
+      #
+      # Per dagger/dagger's RELEASING.md, the canonical publish target is
+      # ghcr.io/dagger/engine; registry.dagger.io/engine is a mirror redirect
+      # that has been observed to be unreachable from GH Actions runners for
+      # minutes at a time. We try GHCR first and retag locally so the Dagger
+      # SDK finds the image under its expected name, and fall back to the
+      # mirror so a GHCR outage doesn't block us either. Each retry attempt
+      # tries both registries before sleeping (exponential backoff, up to
+      # ~4 minutes total wait on a cold cache).
       # See https://github.com/guettli/otelhouse/issues/15.
       - name: Pre-pull Dagger engine image
         run: |
           set -eu
-          image="registry.dagger.io/engine:${DAGGER_ENGINE_VERSION}"
+          canonical="registry.dagger.io/engine:${DAGGER_ENGINE_VERSION}"
+          mirror="ghcr.io/dagger/engine:${DAGGER_ENGINE_VERSION}"
           if [ -f /tmp/dagger-engine.tar ]; then
             echo "Loading engine image from cache" >&2
             docker load -i /tmp/dagger-engine.tar
@@ -60,18 +68,23 @@ jobs:
           fi
           attempt=1
           for backoff in 10 20 30 60 120 0; do
-            if docker pull "$image"; then
-              docker save "$image" -o /tmp/dagger-engine.tar
-              exit 0
-            fi
+            for src in "$mirror" "$canonical"; do
+              if docker pull "$src"; then
+                if [ "$src" != "$canonical" ]; then
+                  docker tag "$src" "$canonical"
+                fi
+                docker save "$canonical" -o /tmp/dagger-engine.tar
+                exit 0
+              fi
+            done
             if [ "$backoff" -eq 0 ]; then
               break
             fi
-            echo "pull attempt $attempt failed; retrying in ${backoff}s" >&2
+            echo "pull attempt $attempt failed on both registries; retrying in ${backoff}s" >&2
             sleep "$backoff"
             attempt=$((attempt + 1))
           done
-          echo "pull failed after $attempt attempts" >&2
+          echo "pull failed after $attempt attempts (both registries)" >&2
           exit 1
 
       - name: Run Dagger pipeline
