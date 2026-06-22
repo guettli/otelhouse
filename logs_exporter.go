@@ -12,16 +12,21 @@ import (
 
 // LogExporter writes OTel log records to ClickHouse.
 type LogExporter struct {
-	conn  driver.Conn
-	table string
+	conn          driver.Conn
+	table         string
+	retentionDays int
 }
 
 // NewLogExporter opens a ClickHouse connection and returns a ready-to-use
-// LogExporter. The Config{DSN,Table} type is reused from the trace exporter;
-// Table defaults to "otel_logs".
+// LogExporter. The Config type is reused from the trace exporter; Table
+// defaults to "otel_logs" (overriding the traces-side "otel_traces" default).
+// RetentionDays honours the same semantics as the traces exporter.
 func NewLogExporter(ctx context.Context, cfg Config) (*LogExporter, error) {
 	if cfg.Table == "" {
 		cfg.Table = "otel_logs"
+	}
+	if cfg.RetentionDays == 0 {
+		cfg.RetentionDays = 180
 	}
 	opts, err := clickhouse.ParseDSN(cfg.DSN)
 	if err != nil {
@@ -35,12 +40,13 @@ func NewLogExporter(ctx context.Context, cfg Config) (*LogExporter, error) {
 		_ = conn.Close()
 		return nil, fmt.Errorf("ping: %w", err)
 	}
-	return &LogExporter{conn: conn, table: cfg.Table}, nil
+	return &LogExporter{conn: conn, table: cfg.Table, retentionDays: cfg.RetentionDays}, nil
 }
 
 // CreateLogSchema creates the logs table if it does not exist.
 func (e *LogExporter) CreateLogSchema(ctx context.Context) error {
-	return e.conn.Exec(ctx, logsSchemaSQL(e.table))
+	warnIfTableExists(ctx, e.conn, e.table)
+	return e.conn.Exec(ctx, logsSchemaSQL(e.table, e.retentionDays))
 }
 
 // Export sends a batch of log records to ClickHouse. Implements

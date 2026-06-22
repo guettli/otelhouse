@@ -109,24 +109,77 @@ func TestConfigApplyDefaults(t *testing.T) {
 		want Config
 	}{
 		{
-			name: "empty table defaults to otel_traces",
+			name: "empty table defaults to otel_traces and 180-day retention",
 			in:   Config{},
-			want: Config{Table: "otel_traces"},
+			want: Config{Table: "otel_traces", RetentionDays: 180},
 		},
 		{
 			name: "explicit table is preserved",
 			in:   Config{Table: "custom_traces"},
-			want: Config{Table: "custom_traces"},
+			want: Config{Table: "custom_traces", RetentionDays: 180},
 		},
 		{
 			name: "empty DSN is not invented",
 			in:   Config{Table: "t"},
-			want: Config{Table: "t"},
+			want: Config{Table: "t", RetentionDays: 180},
 		},
 		{
 			name: "DSN is preserved",
 			in:   Config{DSN: "clickhouse://localhost:9000/db"},
-			want: Config{DSN: "clickhouse://localhost:9000/db", Table: "otel_traces"},
+			want: Config{DSN: "clickhouse://localhost:9000/db", Table: "otel_traces", RetentionDays: 180},
+		},
+		{
+			name: "explicit retention is preserved",
+			in:   Config{RetentionDays: 30},
+			want: Config{Table: "otel_traces", RetentionDays: 30},
+		},
+		{
+			name: "negative retention sentinel survives defaulting",
+			in:   Config{RetentionDays: -1},
+			want: Config{Table: "otel_traces", RetentionDays: -1},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.in
+			got.applyDefaults()
+			if got != tt.want {
+				t.Errorf("applyDefaults = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMetricConfigApplyDefaults(t *testing.T) {
+	tests := []struct {
+		name string
+		in   MetricConfig
+		want MetricConfig
+	}{
+		{
+			name: "empty prefix defaults to otel_metrics and 180-day retention",
+			in:   MetricConfig{},
+			want: MetricConfig{Prefix: "otel_metrics", RetentionDays: 180},
+		},
+		{
+			name: "explicit prefix is preserved",
+			in:   MetricConfig{Prefix: "custom_metrics"},
+			want: MetricConfig{Prefix: "custom_metrics", RetentionDays: 180},
+		},
+		{
+			name: "DSN is preserved",
+			in:   MetricConfig{DSN: "clickhouse://localhost:9000/db"},
+			want: MetricConfig{DSN: "clickhouse://localhost:9000/db", Prefix: "otel_metrics", RetentionDays: 180},
+		},
+		{
+			name: "explicit retention is preserved",
+			in:   MetricConfig{RetentionDays: 30},
+			want: MetricConfig{Prefix: "otel_metrics", RetentionDays: 30},
+		},
+		{
+			name: "negative retention sentinel survives defaulting",
+			in:   MetricConfig{RetentionDays: -1},
+			want: MetricConfig{Prefix: "otel_metrics", RetentionDays: -1},
 		},
 	}
 	for _, tt := range tests {
@@ -142,7 +195,7 @@ func TestConfigApplyDefaults(t *testing.T) {
 
 func TestSchemaSQL(t *testing.T) {
 	const table = "unit_test_traces"
-	sql := schemaSQL(table)
+	sql := schemaSQL(table, 180)
 
 	if sql == "" {
 		t.Fatal("schemaSQL returned empty string")
@@ -161,6 +214,7 @@ func TestSchemaSQL(t *testing.T) {
 		"SpanAttributes",
 		"EventAttributes",
 		"LinkAttributes",
+		"TTL toDateTime(Timestamp) + toIntervalDay(180)",
 	}
 	for _, want := range wantSubstrings {
 		if !strings.Contains(sql, want) {
@@ -169,14 +223,105 @@ func TestSchemaSQL(t *testing.T) {
 	}
 
 	// Idempotent: same input → same output.
-	if schemaSQL(table) != sql {
+	if schemaSQL(table, 180) != sql {
 		t.Error("schemaSQL is not deterministic for the same input")
+	}
+}
+
+func TestSchemaSQL_Retention(t *testing.T) {
+	const table = "unit_test_traces"
+	tests := []struct {
+		name        string
+		days        int
+		mustContain []string
+		mustNot     []string
+	}{
+		{
+			name:        "default 180 days",
+			days:        180,
+			mustContain: []string{"TTL toDateTime(Timestamp)", "toIntervalDay(180)"},
+		},
+		{
+			name:        "custom 30 days",
+			days:        30,
+			mustContain: []string{"TTL toDateTime(Timestamp)", "toIntervalDay(30)"},
+			mustNot:     []string{"toIntervalDay(180)"},
+		},
+		{
+			name:    "negative omits TTL",
+			days:    -1,
+			mustNot: []string{"TTL ", "toIntervalDay("},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sql := schemaSQL(table, tt.days)
+			for _, s := range tt.mustContain {
+				if !strings.Contains(sql, s) {
+					t.Errorf("schemaSQL(%d) missing %q:\n%s", tt.days, s, sql)
+				}
+			}
+			for _, s := range tt.mustNot {
+				if strings.Contains(sql, s) {
+					t.Errorf("schemaSQL(%d) unexpectedly contains %q:\n%s", tt.days, s, sql)
+				}
+			}
+		})
+	}
+}
+
+func TestMetricsSchemaSQL_Retention(t *testing.T) {
+	const prefix = "unit_test_metrics"
+	tests := []struct {
+		name        string
+		days        int
+		mustContain []string
+		mustNot     []string
+	}{
+		{
+			name:        "default 180 days",
+			days:        180,
+			mustContain: []string{"TTL toDateTime(TimeUnix)", "toIntervalDay(180)"},
+		},
+		{
+			name:        "custom 30 days",
+			days:        30,
+			mustContain: []string{"TTL toDateTime(TimeUnix)", "toIntervalDay(30)"},
+			mustNot:     []string{"toIntervalDay(180)"},
+		},
+		{
+			name:    "negative omits TTL",
+			days:    -1,
+			mustNot: []string{"TTL ", "toIntervalDay("},
+		},
+	}
+	wantSuffixes := []string{"gauge", "sum", "histogram", "exponential_histogram", "summary"}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stmts := metricsSchemaSQL(prefix, tt.days)
+			for _, suffix := range wantSuffixes {
+				sql, ok := stmts[suffix]
+				if !ok {
+					t.Fatalf("metricsSchemaSQL missing %q statement", suffix)
+				}
+				for _, s := range tt.mustContain {
+					if !strings.Contains(sql, s) {
+						t.Errorf("%s_%s(%d) missing %q:\n%s", prefix, suffix, tt.days, s, sql)
+					}
+				}
+				for _, s := range tt.mustNot {
+					if strings.Contains(sql, s) {
+						t.Errorf("%s_%s(%d) unexpectedly contains %q:\n%s", prefix, suffix, tt.days, s, sql)
+					}
+				}
+			}
+		})
 	}
 }
 
 func TestLogsSchemaSQL(t *testing.T) {
 	const table = "unit_test_logs"
-	sql := logsSchemaSQL(table)
+	sql := logsSchemaSQL(table, 180)
 
 	if sql == "" {
 		t.Fatal("logsSchemaSQL returned empty string")
@@ -199,6 +344,7 @@ func TestLogsSchemaSQL(t *testing.T) {
 		"TraceId",
 		"SpanId",
 		"TraceFlags",
+		"TTL toDateTime(Timestamp) + toIntervalDay(180)",
 	}
 	for _, want := range wantSubstrings {
 		if !strings.Contains(sql, want) {
@@ -207,8 +353,50 @@ func TestLogsSchemaSQL(t *testing.T) {
 	}
 
 	// Idempotent: same input → same output.
-	if logsSchemaSQL(table) != sql {
+	if logsSchemaSQL(table, 180) != sql {
 		t.Error("logsSchemaSQL is not deterministic for the same input")
+	}
+}
+
+func TestLogsSchemaSQL_Retention(t *testing.T) {
+	const table = "unit_test_logs"
+	tests := []struct {
+		name        string
+		days        int
+		mustContain []string
+		mustNot     []string
+	}{
+		{
+			name:        "default 180 days",
+			days:        180,
+			mustContain: []string{"TTL toDateTime(Timestamp)", "toIntervalDay(180)"},
+		},
+		{
+			name:        "custom 30 days",
+			days:        30,
+			mustContain: []string{"TTL toDateTime(Timestamp)", "toIntervalDay(30)"},
+			mustNot:     []string{"toIntervalDay(180)"},
+		},
+		{
+			name:    "negative omits TTL",
+			days:    -1,
+			mustNot: []string{"TTL ", "toIntervalDay("},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sql := logsSchemaSQL(table, tt.days)
+			for _, s := range tt.mustContain {
+				if !strings.Contains(sql, s) {
+					t.Errorf("logsSchemaSQL(%d) missing %q:\n%s", tt.days, s, sql)
+				}
+			}
+			for _, s := range tt.mustNot {
+				if strings.Contains(sql, s) {
+					t.Errorf("logsSchemaSQL(%d) unexpectedly contains %q:\n%s", tt.days, s, sql)
+				}
+			}
+		})
 	}
 }
 

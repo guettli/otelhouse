@@ -4,10 +4,10 @@ OpenTelemetry span, metric and log exporter for [ClickHouse](https://clickhouse.
 
 Spans are stored in a single `otel_traces` table partitioned by day, with
 [MergeTree](https://clickhouse.com/docs/en/engines/table-engines/mergetree-family/mergetree)
-ordering and a 180-day TTL.  Metrics land in five `otel_metrics_*` tables —
-`gauge`, `sum`, `histogram`, `exponential_histogram` and `summary` — that
-share the same MergeTree layout and retention.  The trace and metric schemas
-intentionally mirror the ones used by the
+ordering and a 180-day TTL by default (configurable).  Metrics land in five
+`otel_metrics_*` tables — `gauge`, `sum`, `histogram`, `exponential_histogram`
+and `summary` — that share the same MergeTree layout and retention.  The
+trace and metric schemas intentionally mirror the ones used by the
 [OpenTelemetry Collector ClickHouse exporter](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/exporter/clickhouseexporter)
 so Grafana dashboards built for that exporter work here too.  Logs land in
 `otel_logs` using a schema native to `sdklog.Record` and are *not* drop-in
@@ -73,9 +73,31 @@ lp := sdklog.NewLoggerProvider(
 )
 ```
 
-Logs land in `otel_logs` (MergeTree, day-partitioned, 180-day TTL). The
-schema is native to `sdklog.Record` and is *not* drop-in compatible with the
-upstream Collector ClickHouse exporter's logs table.
+Logs land in `otel_logs` (MergeTree, day-partitioned, 180-day TTL by default).
+The schema is native to `sdklog.Record` and is *not* drop-in compatible with
+the upstream Collector ClickHouse exporter's logs table.
+
+## Retention
+
+All three schemas set a `TTL` clause of 180 days by default.  Override it on
+the config with `RetentionDays`:
+
+```go
+otelhouse.Config{DSN: ..., RetentionDays: 30}       // 30-day retention
+otelhouse.MetricConfig{DSN: ..., RetentionDays: -1} // no TTL clause emitted
+```
+
+A positive value sets that many days; a negative value (e.g. `-1`) omits the
+`TTL` clause entirely so retention can be managed out-of-band.  The same
+`RetentionDays` field on `Config` is honoured by both `New` (traces) and
+`NewLogExporter` (logs).
+
+Retention is baked into the `CREATE TABLE` statement, so changing
+`RetentionDays` only affects **newly created** tables — `CREATE TABLE IF NOT
+EXISTS` will not modify the TTL of an existing one.  `CreateSchema` /
+`CreateLogSchema` logs a warning when it finds the table already present.  To
+change retention on an existing table, run `ALTER TABLE … MODIFY TTL …`
+yourself in ClickHouse.
 
 ## Testing with Dagger's own OTel data
 
