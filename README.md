@@ -121,6 +121,52 @@ callers see no behavior change.  `Compression: true` enables LZ4; a
 fields are also available on `MetricConfig` and are honoured by `New`,
 `NewMetricExporter` and `NewLogExporter`.
 
+## Local ingestion pipeline (Docker Compose)
+
+A `docker-compose.yml` at the repo root brings up a ready-to-use ingestion
+pipeline: a ClickHouse server plus an [OpenTelemetry Collector
+contrib](https://github.com/open-telemetry/opentelemetry-collector-contrib)
+instance pre-configured with an OTLP receiver and the upstream
+`clickhouse` exporter.  The Collector auto-manages the schema (traces,
+metrics and logs tables) on first start.
+
+Start the stack:
+
+```sh
+docker compose up -d
+```
+
+This exposes:
+
+- `localhost:4317` — OTLP gRPC receiver
+- `localhost:4318` — OTLP HTTP receiver
+- `localhost:8123` — ClickHouse HTTP (user `otel`, password `otel`, db `otel`)
+- `localhost:9000` — ClickHouse native TCP
+
+Point any OTLP-aware producer — including Dagger — at the Collector:
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 dagger run ...
+```
+
+Inspect what landed in ClickHouse with the `clickhouse-client` binary inside
+the container:
+
+```sh
+docker compose exec clickhouse clickhouse-client \
+    --user otel --password otel --database otel \
+    --query "SELECT count() FROM otel_traces"
+```
+
+Tear the stack down (and drop the data volume) with:
+
+```sh
+docker compose down -v
+```
+
+The Collector config lives in `otel-collector-config.yaml` — edit it to tune
+batching, retention (`ttl`) or to add extra receivers/exporters.
+
 ## Testing with Dagger's own OTel data
 
 The integration tests (`TestExporter_DaggerLikeTrace`,
@@ -129,12 +175,16 @@ create spans, metrics and log records that mirror the attributes Dagger emits
 (`dagger.op`, `dagger.cached`, `dagger.cmd`) and verify they land in
 ClickHouse.
 
-To feed real Dagger pipeline traces into the exporter, point Dagger at an OTLP
-receiver backed by `otelhouse`:
+To feed real Dagger pipeline traces into the exporter library directly, point
+Dagger at an OTLP receiver backed by `otelhouse`:
 
 ```sh
 OTEL_EXPORTER_OTLP_ENDPOINT=http://your-otelhouse-receiver:4318 dagger run ...
 ```
+
+For a turnkey local setup, use the Docker Compose stack described above —
+it runs the upstream Collector's `clickhouse` exporter, which is schema- and
+table-compatible with this library for traces and metrics.
 
 ## CI
 
