@@ -13,8 +13,9 @@ import (
 // MetricExporter writes OTel metrics to ClickHouse, one table per data type
 // (gauge, sum, histogram, exponential histogram, summary).
 type MetricExporter struct {
-	conn   driver.Conn
-	prefix string
+	conn          driver.Conn
+	prefix        string
+	retentionDays int
 }
 
 // MetricConfig configures the MetricExporter.
@@ -27,14 +28,31 @@ type MetricConfig struct {
 	// Tables created are <Prefix>_gauge, <Prefix>_sum, <Prefix>_histogram,
 	// <Prefix>_exponential_histogram and <Prefix>_summary.
 	Prefix string
+
+	// RetentionDays controls the TTL clause baked into CreateSchema for every
+	// metric sub-table. A zero value (the default) means 180 days; a positive
+	// value uses that many days; a negative value (e.g. -1) omits the TTL
+	// clause entirely so retention can be managed out-of-band. Only applies
+	// to newly created tables: CreateSchema uses CREATE TABLE IF NOT EXISTS
+	// and will not modify the TTL of an existing table.
+	RetentionDays int
+}
+
+// applyDefaults fills zero-valued MetricConfig fields with their defaults.
+// Pure: no I/O, safe to call from unit tests.
+func (c *MetricConfig) applyDefaults() {
+	if c.Prefix == "" {
+		c.Prefix = "otel_metrics"
+	}
+	if c.RetentionDays == 0 {
+		c.RetentionDays = 180
+	}
 }
 
 // NewMetricExporter opens a ClickHouse connection and returns a ready-to-use
 // MetricExporter.
 func NewMetricExporter(ctx context.Context, cfg MetricConfig) (*MetricExporter, error) {
-	if cfg.Prefix == "" {
-		cfg.Prefix = "otel_metrics"
-	}
+	cfg.applyDefaults()
 	opts, err := clickhouse.ParseDSN(cfg.DSN)
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn: %w", err)
@@ -47,12 +65,13 @@ func NewMetricExporter(ctx context.Context, cfg MetricConfig) (*MetricExporter, 
 		_ = conn.Close()
 		return nil, fmt.Errorf("ping: %w", err)
 	}
-	return &MetricExporter{conn: conn, prefix: cfg.Prefix}, nil
+	return &MetricExporter{conn: conn, prefix: cfg.Prefix, retentionDays: cfg.RetentionDays}, nil
 }
 
 // CreateSchema creates the five metric tables if they do not exist.
 func (e *MetricExporter) CreateSchema(ctx context.Context) error {
-	for suffix, stmt := range metricsSchemaSQL(e.prefix) {
+	for suffix, stmt := range metricsSchemaSQL(e.prefix, e.retentionDays) {
+		warnIfTableExists(ctx, e.conn, e.prefix+"_"+suffix)
 		if err := e.conn.Exec(ctx, stmt); err != nil {
 			return fmt.Errorf("create %s_%s: %w", e.prefix, suffix, err)
 		}

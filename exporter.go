@@ -3,6 +3,7 @@ package otelhouse
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -13,8 +14,9 @@ import (
 
 // Exporter writes OTel spans to ClickHouse.
 type Exporter struct {
-	conn  driver.Conn
-	table string
+	conn          driver.Conn
+	table         string
+	retentionDays int
 }
 
 // Config configures the Exporter.
@@ -25,6 +27,14 @@ type Config struct {
 
 	// Table is the ClickHouse table name. Defaults to "otel_traces".
 	Table string
+
+	// RetentionDays controls the TTL clause baked into CreateSchema. A zero
+	// value (the default) means 180 days; a positive value uses that many
+	// days; a negative value (e.g. -1) omits the TTL clause entirely so
+	// retention can be managed out-of-band. Only applies to newly created
+	// tables: CreateSchema uses CREATE TABLE IF NOT EXISTS and will not
+	// modify the TTL of an existing table.
+	RetentionDays int
 }
 
 // applyDefaults fills zero-valued Config fields with their defaults.
@@ -32,6 +42,9 @@ type Config struct {
 func (c *Config) applyDefaults() {
 	if c.Table == "" {
 		c.Table = "otel_traces"
+	}
+	if c.RetentionDays == 0 {
+		c.RetentionDays = 180
 	}
 }
 
@@ -50,12 +63,27 @@ func New(ctx context.Context, cfg Config) (*Exporter, error) {
 		_ = conn.Close()
 		return nil, fmt.Errorf("ping: %w", err)
 	}
-	return &Exporter{conn: conn, table: cfg.Table}, nil
+	return &Exporter{conn: conn, table: cfg.Table, retentionDays: cfg.RetentionDays}, nil
 }
 
 // CreateSchema creates the traces table if it does not exist.
 func (e *Exporter) CreateSchema(ctx context.Context) error {
-	return e.conn.Exec(ctx, schemaSQL(e.table))
+	warnIfTableExists(ctx, e.conn, e.table)
+	return e.conn.Exec(ctx, schemaSQL(e.table, e.retentionDays))
+}
+
+// warnIfTableExists emits a one-line log when the named table already exists,
+// to flag that a freshly configured RetentionDays will not be applied: the
+// CREATE TABLE IF NOT EXISTS path leaves the existing TTL untouched.
+func warnIfTableExists(ctx context.Context, conn driver.Conn, table string) {
+	var exists uint8
+	row := conn.QueryRow(ctx, "EXISTS TABLE "+table)
+	if err := row.Scan(&exists); err != nil {
+		return
+	}
+	if exists == 1 {
+		log.Printf("otelhouse: table %s already exists; RetentionDays only applies to newly created tables", table)
+	}
 }
 
 // ExportSpans sends a batch of spans to ClickHouse. Implements sdktrace.SpanExporter.

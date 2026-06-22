@@ -2,9 +2,20 @@ package otelhouse
 
 import "fmt"
 
+// ttlClause returns the ClickHouse TTL clause for the given timestamp column
+// and retention. A negative value disables retention by returning an empty
+// string so the surrounding CREATE TABLE statement omits TTL entirely.
+func ttlClause(timeCol string, days int) string {
+	if days < 0 {
+		return ""
+	}
+	return fmt.Sprintf("TTL toDateTime(%s) + toIntervalDay(%d)", timeCol, days)
+}
+
 // schemaSQL returns the CREATE TABLE statement for the given traces table
-// name.
-func schemaSQL(table string) string {
+// name. retentionDays controls the TTL clause: positive values set a TTL,
+// negative values omit the clause entirely.
+func schemaSQL(table string, retentionDays int) string {
 	return fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s
 (
@@ -34,17 +45,20 @@ CREATE TABLE IF NOT EXISTS %s
 ENGINE = MergeTree()
 PARTITION BY toDate(Timestamp)
 ORDER BY (ServiceName, SpanName, toUnixTimestamp(Timestamp))
-TTL toDateTime(Timestamp) + toIntervalDay(180)
+%s
 SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1
-`, table)
+`, table, ttlClause("Timestamp", retentionDays))
 }
 
 // metricsSchemaSQL returns the CREATE TABLE statements for the five metric
 // tables (gauge, sum, histogram, exponential histogram, summary), keyed by
 // table suffix. The names and columns mirror the OpenTelemetry Collector
 // contrib ClickHouse exporter so Grafana dashboards built for that exporter
-// work here too.
-func metricsSchemaSQL(prefix string) map[string]string {
+// work here too. retentionDays controls the TTL clause on every table:
+// positive values set a TTL, negative values omit the clause entirely.
+func metricsSchemaSQL(prefix string, retentionDays int) map[string]string {
+	ttl := ttlClause("TimeUnix", retentionDays)
+
 	gauge := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s_gauge
 (
@@ -68,9 +82,9 @@ CREATE TABLE IF NOT EXISTS %s_gauge
 ENGINE = MergeTree()
 PARTITION BY toDate(TimeUnix)
 ORDER BY (ServiceName, MetricName, toUnixTimestamp(TimeUnix))
-TTL toDateTime(TimeUnix) + toIntervalDay(180)
+%s
 SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1
-`, prefix)
+`, prefix, ttl)
 
 	sum := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s_sum
@@ -97,9 +111,9 @@ CREATE TABLE IF NOT EXISTS %s_sum
 ENGINE = MergeTree()
 PARTITION BY toDate(TimeUnix)
 ORDER BY (ServiceName, MetricName, toUnixTimestamp(TimeUnix))
-TTL toDateTime(TimeUnix) + toIntervalDay(180)
+%s
 SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1
-`, prefix)
+`, prefix, ttl)
 
 	histogram := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s_histogram
@@ -130,9 +144,9 @@ CREATE TABLE IF NOT EXISTS %s_histogram
 ENGINE = MergeTree()
 PARTITION BY toDate(TimeUnix)
 ORDER BY (ServiceName, MetricName, toUnixTimestamp(TimeUnix))
-TTL toDateTime(TimeUnix) + toIntervalDay(180)
+%s
 SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1
-`, prefix)
+`, prefix, ttl)
 
 	expHistogram := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s_exponential_histogram
@@ -168,9 +182,9 @@ CREATE TABLE IF NOT EXISTS %s_exponential_histogram
 ENGINE = MergeTree()
 PARTITION BY toDate(TimeUnix)
 ORDER BY (ServiceName, MetricName, toUnixTimestamp(TimeUnix))
-TTL toDateTime(TimeUnix) + toIntervalDay(180)
+%s
 SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1
-`, prefix)
+`, prefix, ttl)
 
 	summary := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s_summary
@@ -198,9 +212,9 @@ CREATE TABLE IF NOT EXISTS %s_summary
 ENGINE = MergeTree()
 PARTITION BY toDate(TimeUnix)
 ORDER BY (ServiceName, MetricName, toUnixTimestamp(TimeUnix))
-TTL toDateTime(TimeUnix) + toIntervalDay(180)
+%s
 SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1
-`, prefix)
+`, prefix, ttl)
 
 	return map[string]string{
 		"gauge":                 gauge,
