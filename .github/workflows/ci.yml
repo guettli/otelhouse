@@ -33,22 +33,45 @@ jobs:
           go-version-file: ci/go.mod
           cache: true
 
-      # Pre-pull the Dagger engine image with retries to absorb transient
-      # registry.dagger.io timeouts. Without this, a single network blip when
-      # dagger.Connect() pulls the engine fails the entire run.
+      # Cache the Dagger engine image across runs so most CI jobs never hit
+      # registry.dagger.io. The key includes the engine version, so a Dagger
+      # SDK bump in ci/go.mod automatically invalidates the cache.
       # See https://github.com/guettli/otelhouse/issues/15.
-      - name: Pre-pull Dagger engine image (retry)
+      - name: Cache Dagger engine image
+        id: dagger-engine-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/dagger-engine.tar
+          key: dagger-engine-${{ env.DAGGER_ENGINE_VERSION }}
+
+      # Pre-pull (or restore from cache) the Dagger engine image so transient
+      # registry.dagger.io timeouts don't fail the entire run. A cache hit
+      # avoids the registry entirely; a cache miss retries the pull with
+      # exponential backoff (up to ~4 minutes of waiting across 6 attempts).
+      # See https://github.com/guettli/otelhouse/issues/15.
+      - name: Pre-pull Dagger engine image
         run: |
           set -eu
           image="registry.dagger.io/engine:${DAGGER_ENGINE_VERSION}"
-          for attempt in 1 2 3; do
+          if [ -f /tmp/dagger-engine.tar ]; then
+            echo "Loading engine image from cache" >&2
+            docker load -i /tmp/dagger-engine.tar
+            exit 0
+          fi
+          attempt=1
+          for backoff in 10 20 30 60 120 0; do
             if docker pull "$image"; then
+              docker save "$image" -o /tmp/dagger-engine.tar
               exit 0
             fi
-            echo "pull attempt $attempt failed; retrying in $((attempt * 10))s" >&2
-            sleep $((attempt * 10))
+            if [ "$backoff" -eq 0 ]; then
+              break
+            fi
+            echo "pull attempt $attempt failed; retrying in ${backoff}s" >&2
+            sleep "$backoff"
+            attempt=$((attempt + 1))
           done
-          echo "pull failed after 3 attempts" >&2
+          echo "pull failed after $attempt attempts" >&2
           exit 1
 
       - name: Run Dagger pipeline
