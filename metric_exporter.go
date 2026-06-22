@@ -3,6 +3,7 @@ package otelhouse
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -36,6 +37,30 @@ type MetricConfig struct {
 	// to newly created tables: CreateSchema uses CREATE TABLE IF NOT EXISTS
 	// and will not modify the TTL of an existing table.
 	RetentionDays int
+
+	// DialTimeout caps how long the driver waits to establish a connection.
+	// Defaults to 30s (the clickhouse-go default).
+	DialTimeout time.Duration
+
+	// ReadTimeout caps how long the driver waits for a query response. A
+	// zero value (the default) defers to the clickhouse-go default.
+	ReadTimeout time.Duration
+
+	// MaxOpenConns caps the number of open connections in the pool. A zero
+	// value (the default) defers to the clickhouse-go default (MaxIdleConns
+	// + 5).
+	MaxOpenConns int
+
+	// MaxIdleConns caps the number of idle connections in the pool. A zero
+	// value (the default) defers to the clickhouse-go default (5).
+	MaxIdleConns int
+
+	// Compression enables LZ4 block compression on the wire. Defaults to
+	// false to preserve current behavior. When true, the constructor sets
+	// clickhouse.Options.Compression to &clickhouse.Compression{Method:
+	// clickhouse.CompressionLZ4} unless the DSN already specified a
+	// compression= query parameter (in which case the DSN wins).
+	Compression bool
 }
 
 // applyDefaults fills zero-valued MetricConfig fields with their defaults.
@@ -47,6 +72,9 @@ func (c *MetricConfig) applyDefaults() {
 	if c.RetentionDays == 0 {
 		c.RetentionDays = 180
 	}
+	if c.DialTimeout == 0 {
+		c.DialTimeout = 30 * time.Second
+	}
 }
 
 // NewMetricExporter opens a ClickHouse connection and returns a ready-to-use
@@ -57,6 +85,7 @@ func NewMetricExporter(ctx context.Context, cfg MetricConfig) (*MetricExporter, 
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn: %w", err)
 	}
+	applyConnOptions(opts, cfg.DialTimeout, cfg.ReadTimeout, cfg.MaxOpenConns, cfg.MaxIdleConns, cfg.Compression)
 	conn, err := clickhouse.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("open: %w", err)

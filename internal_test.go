@@ -5,7 +5,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
@@ -111,32 +113,47 @@ func TestConfigApplyDefaults(t *testing.T) {
 		{
 			name: "empty table defaults to otel_traces and 180-day retention",
 			in:   Config{},
-			want: Config{Table: "otel_traces", RetentionDays: 180},
+			want: Config{Table: "otel_traces", RetentionDays: 180, DialTimeout: 30 * time.Second},
 		},
 		{
 			name: "explicit table is preserved",
 			in:   Config{Table: "custom_traces"},
-			want: Config{Table: "custom_traces", RetentionDays: 180},
+			want: Config{Table: "custom_traces", RetentionDays: 180, DialTimeout: 30 * time.Second},
 		},
 		{
 			name: "empty DSN is not invented",
 			in:   Config{Table: "t"},
-			want: Config{Table: "t", RetentionDays: 180},
+			want: Config{Table: "t", RetentionDays: 180, DialTimeout: 30 * time.Second},
 		},
 		{
 			name: "DSN is preserved",
 			in:   Config{DSN: "clickhouse://localhost:9000/db"},
-			want: Config{DSN: "clickhouse://localhost:9000/db", Table: "otel_traces", RetentionDays: 180},
+			want: Config{DSN: "clickhouse://localhost:9000/db", Table: "otel_traces", RetentionDays: 180, DialTimeout: 30 * time.Second},
 		},
 		{
 			name: "explicit retention is preserved",
 			in:   Config{RetentionDays: 30},
-			want: Config{Table: "otel_traces", RetentionDays: 30},
+			want: Config{Table: "otel_traces", RetentionDays: 30, DialTimeout: 30 * time.Second},
 		},
 		{
 			name: "negative retention sentinel survives defaulting",
 			in:   Config{RetentionDays: -1},
-			want: Config{Table: "otel_traces", RetentionDays: -1},
+			want: Config{Table: "otel_traces", RetentionDays: -1, DialTimeout: 30 * time.Second},
+		},
+		{
+			name: "explicit dial timeout is preserved",
+			in:   Config{DialTimeout: 5 * time.Second},
+			want: Config{Table: "otel_traces", RetentionDays: 180, DialTimeout: 5 * time.Second},
+		},
+		{
+			name: "read timeout and pool sizes are left at zero for driver defaults",
+			in:   Config{ReadTimeout: 0, MaxOpenConns: 0, MaxIdleConns: 0, Compression: false},
+			want: Config{Table: "otel_traces", RetentionDays: 180, DialTimeout: 30 * time.Second},
+		},
+		{
+			name: "explicit connection options survive defaulting",
+			in:   Config{ReadTimeout: 2 * time.Second, MaxOpenConns: 16, MaxIdleConns: 8, Compression: true},
+			want: Config{Table: "otel_traces", RetentionDays: 180, DialTimeout: 30 * time.Second, ReadTimeout: 2 * time.Second, MaxOpenConns: 16, MaxIdleConns: 8, Compression: true},
 		},
 	}
 	for _, tt := range tests {
@@ -159,27 +176,42 @@ func TestMetricConfigApplyDefaults(t *testing.T) {
 		{
 			name: "empty prefix defaults to otel_metrics and 180-day retention",
 			in:   MetricConfig{},
-			want: MetricConfig{Prefix: "otel_metrics", RetentionDays: 180},
+			want: MetricConfig{Prefix: "otel_metrics", RetentionDays: 180, DialTimeout: 30 * time.Second},
 		},
 		{
 			name: "explicit prefix is preserved",
 			in:   MetricConfig{Prefix: "custom_metrics"},
-			want: MetricConfig{Prefix: "custom_metrics", RetentionDays: 180},
+			want: MetricConfig{Prefix: "custom_metrics", RetentionDays: 180, DialTimeout: 30 * time.Second},
 		},
 		{
 			name: "DSN is preserved",
 			in:   MetricConfig{DSN: "clickhouse://localhost:9000/db"},
-			want: MetricConfig{DSN: "clickhouse://localhost:9000/db", Prefix: "otel_metrics", RetentionDays: 180},
+			want: MetricConfig{DSN: "clickhouse://localhost:9000/db", Prefix: "otel_metrics", RetentionDays: 180, DialTimeout: 30 * time.Second},
 		},
 		{
 			name: "explicit retention is preserved",
 			in:   MetricConfig{RetentionDays: 30},
-			want: MetricConfig{Prefix: "otel_metrics", RetentionDays: 30},
+			want: MetricConfig{Prefix: "otel_metrics", RetentionDays: 30, DialTimeout: 30 * time.Second},
 		},
 		{
 			name: "negative retention sentinel survives defaulting",
 			in:   MetricConfig{RetentionDays: -1},
-			want: MetricConfig{Prefix: "otel_metrics", RetentionDays: -1},
+			want: MetricConfig{Prefix: "otel_metrics", RetentionDays: -1, DialTimeout: 30 * time.Second},
+		},
+		{
+			name: "explicit dial timeout is preserved",
+			in:   MetricConfig{DialTimeout: 5 * time.Second},
+			want: MetricConfig{Prefix: "otel_metrics", RetentionDays: 180, DialTimeout: 5 * time.Second},
+		},
+		{
+			name: "read timeout and pool sizes are left at zero for driver defaults",
+			in:   MetricConfig{ReadTimeout: 0, MaxOpenConns: 0, MaxIdleConns: 0, Compression: false},
+			want: MetricConfig{Prefix: "otel_metrics", RetentionDays: 180, DialTimeout: 30 * time.Second},
+		},
+		{
+			name: "explicit connection options survive defaulting",
+			in:   MetricConfig{ReadTimeout: 2 * time.Second, MaxOpenConns: 16, MaxIdleConns: 8, Compression: true},
+			want: MetricConfig{Prefix: "otel_metrics", RetentionDays: 180, DialTimeout: 30 * time.Second, ReadTimeout: 2 * time.Second, MaxOpenConns: 16, MaxIdleConns: 8, Compression: true},
 		},
 	}
 	for _, tt := range tests {
@@ -191,6 +223,68 @@ func TestMetricConfigApplyDefaults(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestApplyConnOptions(t *testing.T) {
+	t.Run("zero inputs leave fields untouched", func(t *testing.T) {
+		opts := &clickhouse.Options{}
+		applyConnOptions(opts, 0, 0, 0, 0, false)
+		if opts.DialTimeout != 0 {
+			t.Errorf("DialTimeout = %v, want 0", opts.DialTimeout)
+		}
+		if opts.ReadTimeout != 0 {
+			t.Errorf("ReadTimeout = %v, want 0", opts.ReadTimeout)
+		}
+		if opts.MaxOpenConns != 0 {
+			t.Errorf("MaxOpenConns = %d, want 0", opts.MaxOpenConns)
+		}
+		if opts.MaxIdleConns != 0 {
+			t.Errorf("MaxIdleConns = %d, want 0", opts.MaxIdleConns)
+		}
+		if opts.Compression != nil {
+			t.Errorf("Compression = %+v, want nil", opts.Compression)
+		}
+	})
+
+	t.Run("non-zero inputs are copied through", func(t *testing.T) {
+		opts := &clickhouse.Options{}
+		applyConnOptions(opts, 7*time.Second, 11*time.Second, 17, 5, true)
+		if opts.DialTimeout != 7*time.Second {
+			t.Errorf("DialTimeout = %v, want 7s", opts.DialTimeout)
+		}
+		if opts.ReadTimeout != 11*time.Second {
+			t.Errorf("ReadTimeout = %v, want 11s", opts.ReadTimeout)
+		}
+		if opts.MaxOpenConns != 17 {
+			t.Errorf("MaxOpenConns = %d, want 17", opts.MaxOpenConns)
+		}
+		if opts.MaxIdleConns != 5 {
+			t.Errorf("MaxIdleConns = %d, want 5", opts.MaxIdleConns)
+		}
+		if opts.Compression == nil || opts.Compression.Method != clickhouse.CompressionLZ4 {
+			t.Errorf("Compression = %+v, want LZ4", opts.Compression)
+		}
+	})
+
+	t.Run("DSN-supplied compression wins over compress=true", func(t *testing.T) {
+		preset := &clickhouse.Compression{Method: clickhouse.CompressionZSTD}
+		opts := &clickhouse.Options{Compression: preset}
+		applyConnOptions(opts, 0, 0, 0, 0, true)
+		if opts.Compression != preset {
+			t.Errorf("Compression overwritten: got %+v, want %+v", opts.Compression, preset)
+		}
+		if opts.Compression.Method != clickhouse.CompressionZSTD {
+			t.Errorf("Compression.Method = %v, want %v", opts.Compression.Method, clickhouse.CompressionZSTD)
+		}
+	})
+
+	t.Run("compress=false leaves nil Compression alone", func(t *testing.T) {
+		opts := &clickhouse.Options{}
+		applyConnOptions(opts, 0, 0, 0, 0, false)
+		if opts.Compression != nil {
+			t.Errorf("Compression = %+v, want nil", opts.Compression)
+		}
+	})
 }
 
 func TestSchemaSQL(t *testing.T) {

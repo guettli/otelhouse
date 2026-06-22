@@ -20,18 +20,18 @@ type LogExporter struct {
 // NewLogExporter opens a ClickHouse connection and returns a ready-to-use
 // LogExporter. The Config type is reused from the trace exporter; Table
 // defaults to "otel_logs" (overriding the traces-side "otel_traces" default).
-// RetentionDays honours the same semantics as the traces exporter.
+// RetentionDays and the connection options honour the same semantics as the
+// traces exporter.
 func NewLogExporter(ctx context.Context, cfg Config) (*LogExporter, error) {
 	if cfg.Table == "" {
 		cfg.Table = "otel_logs"
 	}
-	if cfg.RetentionDays == 0 {
-		cfg.RetentionDays = 180
-	}
+	cfg.applyDefaults()
 	opts, err := clickhouse.ParseDSN(cfg.DSN)
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn: %w", err)
 	}
+	applyConnOptions(opts, cfg.DialTimeout, cfg.ReadTimeout, cfg.MaxOpenConns, cfg.MaxIdleConns, cfg.Compression)
 	conn, err := clickhouse.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("open: %w", err)
