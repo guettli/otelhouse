@@ -99,6 +99,28 @@ EXISTS` will not modify the TTL of an existing one.  `CreateSchema` /
 change retention on an existing table, run `ALTER TABLE … MODIFY TTL …`
 yourself in ClickHouse.
 
+## Connection options
+
+`Config` and `MetricConfig` expose a small, typed set of ClickHouse client
+tunables that augment the DSN:
+
+```go
+otelhouse.Config{
+    DSN:          "clickhouse://localhost:9000/default",
+    DialTimeout:  5 * time.Second, // default 30s
+    ReadTimeout:  30 * time.Second,
+    MaxOpenConns: 16,              // 0 → driver default (MaxIdleConns + 5)
+    MaxIdleConns: 8,               // 0 → driver default (5)
+    Compression:  true,            // enables LZ4
+}
+```
+
+Zero values mean "use the `clickhouse-go` driver default", so existing
+callers see no behavior change.  `Compression: true` enables LZ4; a
+`compression=` query parameter on the DSN takes precedence if set.  The same
+fields are also available on `MetricConfig` and are honoured by `New`,
+`NewMetricExporter` and `NewLogExporter`.
+
 ## Testing with Dagger's own OTel data
 
 The integration tests (`TestExporter_DaggerLikeTrace`,

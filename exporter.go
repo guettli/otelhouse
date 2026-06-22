@@ -35,6 +35,30 @@ type Config struct {
 	// tables: CreateSchema uses CREATE TABLE IF NOT EXISTS and will not
 	// modify the TTL of an existing table.
 	RetentionDays int
+
+	// DialTimeout caps how long the driver waits to establish a connection.
+	// Defaults to 30s (the clickhouse-go default).
+	DialTimeout time.Duration
+
+	// ReadTimeout caps how long the driver waits for a query response. A
+	// zero value (the default) defers to the clickhouse-go default.
+	ReadTimeout time.Duration
+
+	// MaxOpenConns caps the number of open connections in the pool. A zero
+	// value (the default) defers to the clickhouse-go default (MaxIdleConns
+	// + 5).
+	MaxOpenConns int
+
+	// MaxIdleConns caps the number of idle connections in the pool. A zero
+	// value (the default) defers to the clickhouse-go default (5).
+	MaxIdleConns int
+
+	// Compression enables LZ4 block compression on the wire. Defaults to
+	// false to preserve current behavior. When true, the constructor sets
+	// clickhouse.Options.Compression to &clickhouse.Compression{Method:
+	// clickhouse.CompressionLZ4} unless the DSN already specified a
+	// compression= query parameter (in which case the DSN wins).
+	Compression bool
 }
 
 // applyDefaults fills zero-valued Config fields with their defaults.
@@ -46,6 +70,31 @@ func (c *Config) applyDefaults() {
 	if c.RetentionDays == 0 {
 		c.RetentionDays = 180
 	}
+	if c.DialTimeout == 0 {
+		c.DialTimeout = 30 * time.Second
+	}
+}
+
+// applyConnOptions mutates opts with the typed connection fields. Zero
+// values are skipped so the driver's own defaults apply. A pre-existing
+// opts.Compression (set by a compression= DSN query parameter) is never
+// overwritten — the DSN wins.
+func applyConnOptions(opts *clickhouse.Options, dial, read time.Duration, maxOpen, maxIdle int, compress bool) {
+	if dial != 0 {
+		opts.DialTimeout = dial
+	}
+	if read != 0 {
+		opts.ReadTimeout = read
+	}
+	if maxOpen != 0 {
+		opts.MaxOpenConns = maxOpen
+	}
+	if maxIdle != 0 {
+		opts.MaxIdleConns = maxIdle
+	}
+	if compress && opts.Compression == nil {
+		opts.Compression = &clickhouse.Compression{Method: clickhouse.CompressionLZ4}
+	}
 }
 
 // New opens a ClickHouse connection and returns a ready-to-use Exporter.
@@ -55,6 +104,7 @@ func New(ctx context.Context, cfg Config) (*Exporter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse dsn: %w", err)
 	}
+	applyConnOptions(opts, cfg.DialTimeout, cfg.ReadTimeout, cfg.MaxOpenConns, cfg.MaxIdleConns, cfg.Compression)
 	conn, err := clickhouse.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("open: %w", err)
