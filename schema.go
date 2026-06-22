@@ -39,6 +39,34 @@ SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1
 `, table)
 }
 
+// logsSchemaSQL returns the CREATE TABLE statement for the given logs table
+// name. The schema is native to sdklog.Record (no plog.Logs columns) and uses
+// the same MergeTree conventions as the traces table.
+func logsSchemaSQL(table string) string {
+	return fmt.Sprintf(`
+CREATE TABLE IF NOT EXISTS %s
+(
+    Timestamp          DateTime64(9)                              CODEC(Delta, ZSTD(1)),
+    TraceId            String                                     CODEC(ZSTD(1)),
+    SpanId             String                                     CODEC(ZSTD(1)),
+    TraceFlags         UInt8                                      CODEC(ZSTD(1)),
+    SeverityNumber     UInt8                                      CODEC(ZSTD(1)),
+    SeverityText       LowCardinality(String)                     CODEC(ZSTD(1)),
+    ServiceName        LowCardinality(String)                     CODEC(ZSTD(1)),
+    Body               String                                     CODEC(ZSTD(1)),
+    ResourceAttributes Map(LowCardinality(String), String)        CODEC(ZSTD(1)),
+    ScopeName          LowCardinality(String)                     CODEC(ZSTD(1)),
+    ScopeVersion       String                                     CODEC(ZSTD(1)),
+    LogAttributes      Map(LowCardinality(String), String)        CODEC(ZSTD(1))
+)
+ENGINE = MergeTree()
+PARTITION BY toDate(Timestamp)
+ORDER BY (ServiceName, toUnixTimestamp(Timestamp))
+TTL toDateTime(Timestamp) + toIntervalDay(180)
+SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1
+`, table)
+}
+
 // metricsSchemaSQL returns the CREATE TABLE statements for the five metric
 // tables (gauge, sum, histogram, exponential histogram, summary), keyed by
 // table suffix. The names and columns mirror the OpenTelemetry Collector
