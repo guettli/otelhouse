@@ -16,6 +16,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Keep in sync with dagger.io/dagger in ci/go.mod.
+  # Used to pre-pull the engine image so a flaky registry doesn't fail CI.
+  DAGGER_ENGINE_VERSION: v0.21.7
+
 jobs:
   ci:
     name: ci
@@ -27,6 +32,62 @@ jobs:
         with:
           go-version-file: ci/go.mod
           cache: true
+
+      # Cache the Dagger engine image across runs so most CI jobs never hit
+      # the registry. The key includes the engine version, so a Dagger SDK
+      # bump in ci/go.mod automatically invalidates the cache.
+      # See https://github.com/guettli/otelhouse/issues/18.
+      - name: Cache Dagger engine image
+        id: dagger-engine-cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/dagger-engine.tar
+          key: dagger-engine-${{ env.DAGGER_ENGINE_VERSION }}
+
+      # Pre-pull (or restore from cache) the Dagger engine image. The
+      # primary source is registry.dagger.io, which is a redirect to
+      # ghcr.io/dagger/engine (see dagger/dagger RELEASING.md). When the
+      # redirect is unreachable we pull directly from ghcr.io and retag
+      # the image so the Dagger SDK still finds it locally.
+      # See https://github.com/guettli/otelhouse/issues/18.
+      - name: Pre-pull Dagger engine image
+        run: |
+          set -eu
+          primary="registry.dagger.io/engine:${DAGGER_ENGINE_VERSION}"
+          fallback="ghcr.io/dagger/engine:${DAGGER_ENGINE_VERSION}"
+          if [ -f /tmp/dagger-engine.tar ]; then
+            echo "Loading engine image from cache" >&2
+            docker load -i /tmp/dagger-engine.tar
+            exit 0
+          fi
+          pull_with_retry() {
+            image=$1
+            attempt=1
+            while :; do
+              if docker pull "$image"; then
+                return 0
+              fi
+              if [ "$attempt" -ge 3 ]; then
+                return 1
+              fi
+              backoff=$((attempt * 10))
+              echo "pull of $image attempt $attempt failed; retrying in ${backoff}s" >&2
+              sleep "$backoff"
+              attempt=$((attempt + 1))
+            done
+          }
+          if pull_with_retry "$primary"; then
+            docker save "$primary" -o /tmp/dagger-engine.tar
+            exit 0
+          fi
+          echo "primary registry unreachable; falling back to $fallback" >&2
+          if pull_with_retry "$fallback"; then
+            docker tag "$fallback" "$primary"
+            docker save "$primary" -o /tmp/dagger-engine.tar
+            exit 0
+          fi
+          echo "engine image unavailable from both registry.dagger.io and ghcr.io" >&2
+          exit 1
 
       - name: Run Dagger pipeline
         run: cd ci && go run .
