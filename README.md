@@ -167,6 +167,37 @@ docker compose down -v
 The Collector config lives in `otel-collector-config.yaml` — edit it to tune
 batching, retention (`ttl`) or to add extra receivers/exporters.
 
+## HTTP API for Dagger traces and logs
+
+Package [`./api`](./api) exposes a read-only HTTP API for querying the data
+the Docker Compose pipeline (or this package's own exporters) lands in
+ClickHouse.  Three JSON endpoints back the Svelte UI:
+
+- `GET /api/runs` — list of distinct runs (one per `TraceId`) with start time,
+  end time, span count and the resource attributes of a representative span.
+  Accepts `?limit=N` (default `100`, max `1000`).
+- `GET /api/traces/{id}` — full span hierarchy for a single trace, ordered by
+  start time so the response can be rendered as a Gantt/waterfall without
+  re-sorting on the client.
+- `GET /api/logs?traceId={id}` — log records carrying the given trace id,
+  ordered by timestamp.
+
+The endpoints reference only the columns common to both the upstream
+OpenTelemetry Collector ClickHouse exporter and this package's own schemas,
+so they work against the Docker Compose stack out of the box.
+
+Run the bundled `otelhouse-api` binary alongside the Compose pipeline:
+
+```sh
+go run ./cmd/otelhouse-api \
+    -addr :8080 \
+    -dsn "clickhouse://otel:otel@localhost:9000/otel"
+```
+
+The defaults match the Compose credentials and the standard table names
+(`otel_traces`, `otel_logs`); override `-traces-table` / `-logs-table` if
+your ingestion pipeline uses different ones.
+
 ## Testing with Dagger's own OTel data
 
 The integration tests (`TestExporter_DaggerLikeTrace`,
