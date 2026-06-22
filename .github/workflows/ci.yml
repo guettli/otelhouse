@@ -16,6 +16,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Keep in sync with dagger.io/dagger in ci/go.mod.
+  # Used to pre-pull the engine image so a flaky registry doesn't fail CI.
+  DAGGER_ENGINE_VERSION: v0.21.7
+
 jobs:
   ci:
     name: ci
@@ -27,6 +32,24 @@ jobs:
         with:
           go-version-file: ci/go.mod
           cache: true
+
+      # Pre-pull the Dagger engine image with retries to absorb transient
+      # registry.dagger.io timeouts. Without this, a single network blip when
+      # dagger.Connect() pulls the engine fails the entire run.
+      # See https://github.com/guettli/otelhouse/issues/15.
+      - name: Pre-pull Dagger engine image (retry)
+        run: |
+          set -eu
+          image="registry.dagger.io/engine:${DAGGER_ENGINE_VERSION}"
+          for attempt in 1 2 3; do
+            if docker pull "$image"; then
+              exit 0
+            fi
+            echo "pull attempt $attempt failed; retrying in $((attempt * 10))s" >&2
+            sleep $((attempt * 10))
+          done
+          echo "pull failed after 3 attempts" >&2
+          exit 1
 
       - name: Run Dagger pipeline
         run: cd ci && go run .
