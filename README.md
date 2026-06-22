@@ -1,15 +1,17 @@
 # otelhouse
 
-OpenTelemetry span and metric exporter for [ClickHouse](https://clickhouse.com/).
+OpenTelemetry span, metric and log exporter for [ClickHouse](https://clickhouse.com/).
 
 Spans are stored in a single `otel_traces` table partitioned by day, with
 [MergeTree](https://clickhouse.com/docs/en/engines/table-engines/mergetree-family/mergetree)
 ordering and a 180-day TTL.  Metrics land in five `otel_metrics_*` tables —
 `gauge`, `sum`, `histogram`, `exponential_histogram` and `summary` — that
-share the same MergeTree layout and retention.  Both schemas intentionally
-mirror the ones used by the
+share the same MergeTree layout and retention.  The trace and metric schemas
+intentionally mirror the ones used by the
 [OpenTelemetry Collector ClickHouse exporter](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/exporter/clickhouseexporter)
-so Grafana dashboards built for that exporter work here too.
+so Grafana dashboards built for that exporter work here too.  Logs land in
+`otel_logs` using a schema native to `sdklog.Record` and are *not* drop-in
+compatible with the upstream Collector logs table.
 
 ## Quick start
 
@@ -54,12 +56,34 @@ combine it with a `PeriodicReader` for production, or a `ManualReader` plus
 matching `otel_metrics_<gauge|sum|histogram|exponential_histogram|summary>`
 table.
 
+## Logs
+
+```go
+lexp, err := otelhouse.NewLogExporter(ctx, otelhouse.Config{
+    DSN: "clickhouse://localhost:9000/default",
+})
+if err != nil { ... }
+defer lexp.Shutdown(ctx)
+
+if err := lexp.CreateLogSchema(ctx); err != nil { ... }
+
+lp := sdklog.NewLoggerProvider(
+    sdklog.WithProcessor(sdklog.NewBatchProcessor(lexp)),
+    sdklog.WithResource(res),
+)
+```
+
+Logs land in `otel_logs` (MergeTree, day-partitioned, 180-day TTL). The
+schema is native to `sdklog.Record` and is *not* drop-in compatible with the
+upstream Collector ClickHouse exporter's logs table.
+
 ## Testing with Dagger's own OTel data
 
 The integration tests (`TestExporter_DaggerLikeTrace`,
-`TestMetricExporter_DaggerLikeMetrics`) create spans and metrics that mirror
-the attributes Dagger emits (`dagger.op`, `dagger.cached`, `dagger.cmd`) and
-verify they land in ClickHouse.
+`TestMetricExporter_DaggerLikeMetrics`, `TestLogExporter_DaggerLikeLogs`)
+create spans, metrics and log records that mirror the attributes Dagger emits
+(`dagger.op`, `dagger.cached`, `dagger.cmd`) and verify they land in
+ClickHouse.
 
 To feed real Dagger pipeline traces into the exporter, point Dagger at an OTLP
 receiver backed by `otelhouse`:
