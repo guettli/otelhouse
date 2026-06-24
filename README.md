@@ -136,17 +136,34 @@ receiver backed by `otelhouse`:
 OTEL_EXPORTER_OTLP_ENDPOINT=http://your-otelhouse-receiver:4318 dagger run ...
 ```
 
-## CI
+## Testing == CI
 
-CI runs through [Dagger](https://dagger.io/) (`ci/main.go`).  The pipeline:
+The [Dagger](https://dagger.io/) pipeline in `ci/main.go` is the **single
+source of truth** for tests.  Running it locally is byte-identical to what
+GitHub Actions runs, so a green local run implies a green CI run:
+
+```sh
+make test          # == cd ci && go run .
+```
+
+The pipeline stands up its own ephemeral, version-pinned ClickHouse via a
+Dagger service binding — there is nothing to install or start by hand, and no
+separate local stack to keep in sync.  A reachable Dagger engine is the only
+prerequisite; to use a remote engine, export `_EXPERIMENTAL_DAGGER_RUNNER_HOST`
+before running.
+
+There is intentionally **no** `docker-compose` (or other) parallel test
+environment: a second definition of ClickHouse would drift from `ci/main.go`
+and break the "green locally ⇒ green in CI" guarantee.  See
+[#33](https://github.com/guettli/otelhouse/issues/33).
+
+The pipeline runs:
 
 1. `gofmt` — format check
 2. `go vet` — static analysis
 3. `golangci-lint` — lint (`v2.12.2`)
 4. `go build` — compilation
 5. `go test` — integration tests against a live ClickHouse 25.5 service
-
-GitHub Actions invokes the pipeline with `go run ./ci/`.
 
 ## DSN format
 
