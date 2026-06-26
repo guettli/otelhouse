@@ -42,3 +42,11 @@ The pipeline runs:
 3. `golangci-lint` — lint (`v2.12.2`)
 4. `go build` — compilation
 5. `go test` — integration tests against a live ClickHouse 25.5 service
+6. **Ingestion-backbone harness** — stands up the upstream
+   `otel/opentelemetry-collector-contrib` configured with the
+   `clickhouseexporter` (`create_schema: true`) pointed at the same
+   ClickHouse service, drives sample OTLP traces/metrics/logs into it with
+   `telemetrygen`, and verifies the rows land in the upstream-schema tables
+   (`otel_traces`, `otel_logs`, `otel_metrics_gauge`). The Collector config
+   lives in [`ci/otel-collector-config.yaml`](ci/otel-collector-config.yaml)
+   and mirrors the production deployment minus the bearer-token auth.
