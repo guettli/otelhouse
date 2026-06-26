@@ -21,7 +21,7 @@ func pipeline(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("dagger connect: %w", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Repo root is one level up from ci/.
 	src := client.Host().Directory("..", dagger.HostDirectoryOpts{
