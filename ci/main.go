@@ -21,7 +21,7 @@ func pipeline(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("dagger connect: %w", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Mount the whole repo (minus .git/). The Go checks below run from
 	// /src/ci where the only Go module now lives; later harness steps will
