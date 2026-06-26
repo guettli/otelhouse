@@ -23,20 +23,22 @@ func pipeline(ctx context.Context) error {
 	}
 	defer client.Close()
 
-	// Repo root is one level up from ci/.
+	// Mount the whole repo (minus .git/). The Go checks below run from
+	// /src/ci where the only Go module now lives; later harness steps will
+	// also need access to non-Go assets at the repo root (Collector config,
+	// sample-data fixtures, etc.).
 	src := client.Host().Directory("..", dagger.HostDirectoryOpts{
-		Exclude: []string{".git/", "ci/"},
+		Exclude: []string{".git/"},
 	})
 
 	goMod := client.CacheVolume("otelhouse-go-mod")
 	goBuild := client.CacheVolume("otelhouse-go-build")
 
-	// ClickHouse service used for integration tests.
-	// Credentials are set explicitly because the image's entrypoint generates
-	// a random password for the default user when no CLICKHOUSE_* env vars are
-	// provided, which makes the empty-password DSN fail with auth errors.
-	// Dagger's OTel traces can also be forwarded here by setting
-	// OTEL_EXPORTER_OTLP_ENDPOINT to a receiver backed by the otelhouse exporter.
+	// Ephemeral ClickHouse for the integration harness. Kept available for
+	// the next pipeline step (Collector + sample-data generation); the
+	// credentials are set explicitly because the image generates a random
+	// password for the default user when no CLICKHOUSE_* env vars are given,
+	// which makes the empty-password DSN fail with auth errors.
 	clickhouse := client.Container().
 		From("clickhouse/clickhouse-server:25.5").
 		WithEnvVariable("CLICKHOUSE_USER", "test").
@@ -51,12 +53,13 @@ func pipeline(ctx context.Context) error {
 		WithMountedCache("/go/pkg/mod", goMod).
 		WithMountedCache("/root/.cache/go-build", goBuild).
 		WithMountedDirectory("/src", src).
-		WithWorkdir("/src")
+		WithWorkdir("/src/ci")
 
-	// gofmt
+	// gofmt — scan the entire tree so any future Go file outside ci/ is
+	// covered too.
 	if _, err = goBase.
 		WithExec([]string{"sh", "-c",
-			`out=$(gofmt -l .); if [ -n "$out" ]; then echo "unformatted: $out" >&2; exit 1; fi`,
+			`out=$(gofmt -l /src); if [ -n "$out" ]; then echo "unformatted: $out" >&2; exit 1; fi`,
 		}).Sync(ctx); err != nil {
 		return fmt.Errorf("gofmt: %w", err)
 	}
@@ -70,7 +73,7 @@ func pipeline(ctx context.Context) error {
 	lintCtr := client.Container().
 		From("golangci/golangci-lint:v2.12.2-alpine").
 		WithMountedDirectory("/src", src).
-		WithWorkdir("/src")
+		WithWorkdir("/src/ci")
 	if _, err = lintCtr.WithExec([]string{"golangci-lint", "run", "./..."}).Sync(ctx); err != nil {
 		return fmt.Errorf("golangci-lint: %w", err)
 	}
@@ -80,10 +83,10 @@ func pipeline(ctx context.Context) error {
 		return fmt.Errorf("go build: %w", err)
 	}
 
-	// Integration tests with a live ClickHouse instance.
-	// The service hostname is "clickhouse" inside the Dagger network.
-	// Setting OTEL_EXPORTER_OTLP_ENDPOINT here would route the test container's
-	// own OTel output into ClickHouse via the exporter under test.
+	// Integration tests. The ci/ module currently has no _test.go files, so
+	// this is a vacuous pass; the ClickHouse service binding stays wired up
+	// so the next pipeline step can add Collector-driven tests without
+	// re-introducing the service plumbing.
 	if _, err = goBase.
 		WithServiceBinding("clickhouse", clickhouse).
 		WithEnvVariable("CLICKHOUSE_DSN", "clickhouse://test:test@clickhouse:9000/test").
