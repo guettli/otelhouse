@@ -13,6 +13,13 @@ import (
 // first insert) and the emitter stay in sync.
 const otelCollectorVersion = "0.114.0"
 
+// Both the otel-collector-contrib and telemetrygen images are built FROM
+// scratch and ship no /etc/passwd. Dagger's container runtime refuses to
+// exec into a UID it can't resolve, so we inject this minimal root entry
+// before exec'ing and run as root — these are ephemeral CI containers on
+// a private Dagger service network with no security surface.
+const distrolessRootPasswd = "root:x:0:0:root:/:/sbin/nologin\n"
+
 // ClickHouse credentials used by every component in the harness (the server,
 // the collector exporter, query containers). Centralised here so the YAML
 // stays generic and consumes them via ${env:...}.
@@ -141,11 +148,9 @@ func runCollectorHarness(
 
 	collector := client.Container().
 		From(collectorImage).
-		// The upstream collector image declares USER 10001 but that UID
-		// is missing from /etc/passwd in the base layer, and Dagger
-		// refuses to exec into an unresolvable user. Run as root — this
-		// is an ephemeral CI container with no security surface, and the
-		// collector itself does no privileged work.
+		// See distrolessRootPasswd: the upstream image is FROM scratch
+		// and has no /etc/passwd, so even UID 0 can't be resolved.
+		WithNewFile("/etc/passwd", distrolessRootPasswd).
 		WithUser("0").
 		WithServiceBinding("clickhouse", clickhouse).
 		// The YAML reads these via ${env:...} so credentials stay defined
@@ -175,11 +180,9 @@ func runCollectorHarness(
 	for _, e := range emissions {
 		if _, err := client.Container().
 			From(telemetrygenImage).
-			// The upstream telemetrygen image declares USER 10001, but
-			// that UID is absent from /etc/passwd in the base image and
-			// Dagger refuses to exec into an unresolvable user. Run as
-			// root — this is an ephemeral CI container with no security
-			// surface.
+			// See distrolessRootPasswd: same scratch-image situation as
+			// the collector above.
+			WithNewFile("/etc/passwd", distrolessRootPasswd).
 			WithUser("0").
 			WithServiceBinding("otelcol", collector).
 			WithExec([]string{
