@@ -13,12 +13,11 @@ import (
 // first insert) and the emitter stay in sync.
 const otelCollectorVersion = "0.114.0"
 
-// Both the otel-collector-contrib and telemetrygen images are built FROM
-// scratch and ship neither /etc/passwd nor /etc/group. Dagger's container
-// runtime refuses to exec into a UID/GID it can't resolve, so we inject
-// minimal root entries and run as root — these are ephemeral CI
-// containers on a private Dagger service network with no security
-// surface.
+// The otel-collector-contrib image is built FROM scratch and ships
+// neither /etc/passwd nor /etc/group. Dagger's container runtime refuses
+// to exec into a UID/GID it can't resolve, so we inject minimal root
+// entries and run as root — these are ephemeral CI containers on a
+// private Dagger service network with no security surface.
 const (
 	distrolessRootPasswd = "root:x:0:0:root:/:/sbin/nologin\n"
 	distrolessRootGroup  = "root:x:0:\n"
@@ -123,7 +122,7 @@ func pipeline(ctx context.Context) error {
 	// Ingestion backbone: stand up the upstream OTel Collector with the
 	// clickhouseexporter, emit OTLP traces/metrics/logs, and verify the
 	// rows land in the upstream-schema tables.
-	if err = runCollectorHarness(ctx, client, clickhouse, src); err != nil {
+	if err = runCollectorHarness(ctx, client, clickhouse, src, goMod, goBuild); err != nil {
 		return fmt.Errorf("collector harness: %w", err)
 	}
 
@@ -143,12 +142,9 @@ func runCollectorHarness(
 	client *dagger.Client,
 	clickhouse *dagger.Service,
 	src *dagger.Directory,
+	goMod, goBuild *dagger.CacheVolume,
 ) error {
 	collectorImage := fmt.Sprintf("otel/opentelemetry-collector-contrib:%s", otelCollectorVersion)
-	telemetrygenImage := fmt.Sprintf(
-		"ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v%s",
-		otelCollectorVersion,
-	)
 
 	collector := client.Container().
 		From(collectorImage).
@@ -177,6 +173,25 @@ func runCollectorHarness(
 		).
 		AsService()
 
+	// We build telemetrygen from source in a regular golang:alpine
+	// container instead of pulling the published distroless image
+	// (ghcr.io/.../telemetrygen). The upstream image is a multi-arch
+	// OCI index with attestation manifests, and Dagger v0.21.7 hangs
+	// indefinitely trying to resolve it. Building from source via
+	// `go install` is a few seconds with the cache mounts and gives us
+	// a normal Alpine runtime (real /etc/passwd, shell, PATH) which
+	// sidesteps every distroless quirk.
+	telemetrygenPkg := fmt.Sprintf(
+		"github.com/open-telemetry/opentelemetry-collector-contrib/cmd/telemetrygen@v%s",
+		otelCollectorVersion,
+	)
+	telemetrygen := client.Container().
+		From("golang:1.26-alpine").
+		WithMountedCache("/go/pkg/mod", goMod).
+		WithMountedCache("/root/.cache/go-build", goBuild).
+		WithEnvVariable("CGO_ENABLED", "0").
+		WithExec([]string{"go", "install", telemetrygenPkg})
+
 	// telemetrygen blocks until it has sent the requested count over OTLP
 	// and received the receiver-level ack from the collector. The batch
 	// processor (1s timeout) then flushes to ClickHouse asynchronously,
@@ -190,26 +205,14 @@ func runCollectorHarness(
 		{"logs", "--logs"},
 	}
 	for _, e := range emissions {
-		if _, err := client.Container().
-			From(telemetrygenImage).
-			// See distrolessRootPasswd: same scratch-image situation as
-			// the collector above.
-			WithNewFile("/etc/passwd", distrolessRootPasswd).
-			WithNewFile("/etc/group", distrolessRootGroup).
-			WithUser("0").
+		if _, err := telemetrygen.
 			WithServiceBinding("otelcol", collector).
-			// UseEntrypoint prepends the image's ENTRYPOINT
-			// (/telemetrygen) — there's no shell or PATH in the scratch
-			// image to find it otherwise.
-			WithExec(
-				[]string{
-					e.subcommand,
-					"--otlp-endpoint", "otelcol:4317",
-					"--otlp-insecure",
-					e.countFlag, "20",
-				},
-				dagger.ContainerWithExecOpts{UseEntrypoint: true},
-			).
+			WithExec([]string{
+				"/go/bin/telemetrygen", e.subcommand,
+				"--otlp-endpoint", "otelcol:4317",
+				"--otlp-insecure",
+				e.countFlag, "20",
+			}).
 			Sync(ctx); err != nil {
 			return fmt.Errorf("telemetrygen %s: %w", e.subcommand, err)
 		}
