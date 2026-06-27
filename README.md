@@ -112,6 +112,17 @@ The pipeline runs:
 3. `golangci-lint` — lint (`v2.12.2`)
 4. `go build` — compilation
 5. `go test` — integration tests against a live ClickHouse 25.5 service
+6. **End-to-end harness** — stands up the upstream
+   `otel/opentelemetry-collector-contrib` (with
+   [`ci/otel-collector-config.yaml`](ci/otel-collector-config.yaml))
+   pointed at the same ClickHouse service, drives sample OTLP
+   traces/metrics/logs into it with `telemetrygen`, runs the
+   `otelhouse-api` binary as a Dagger service against ClickHouse, and
+   runs the `TestE2E_API` Go test (build tag `e2e`) which hits
+   `/api/runs`, `/api/traces/:id` and `/api/logs?traceId=:id` and asserts
+   the API renders the ingested data. This is the
+   `Dagger → OTLP → Collector → ClickHouse → API` guarantee for the whole
+   harness — one pipeline run validates everything end-to-end.
 
 ## Connecting traces and logs
 
