@@ -35,3 +35,12 @@ go.work.sum
 .vscode
 /*.kubeconfig
 /*.log
+
+# SvelteKit / Node UI
+ui/node_modules
+ui/.svelte-kit
+ui/build
+ui/.vite
+ui/.env
+ui/.env.*
+!ui/.env.example

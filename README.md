@@ -174,8 +174,10 @@ the Docker Compose pipeline (or this package's own exporters) lands in
 ClickHouse.  Three JSON endpoints back the Svelte UI:
 
 - `GET /api/runs` — list of distinct runs (one per `TraceId`) with start time,
-  end time, span count and the resource attributes of a representative span.
-  Accepts `?limit=N` (default `100`, max `1000`).
+  end time, span count, the resource attributes of a representative span, the
+  root span's status code and the invoked command (Dagger's `dagger.cmd`
+  attribute, falling back to the root span name). Accepts `?limit=N`
+  (default `100`, max `1000`).
 - `GET /api/traces/{id}` — full span hierarchy for a single trace, ordered by
   start time so the response can be rendered as a Gantt/waterfall without
   re-sorting on the client.
@@ -197,6 +199,29 @@ go run ./cmd/otelhouse-api \
 The defaults match the Compose credentials and the standard table names
 (`otel_traces`, `otel_logs`); override `-traces-table` / `-logs-table` if
 your ingestion pipeline uses different ones.
+
+## Svelte UI for Dagger runs
+
+A SvelteKit single-page app under [`./ui`](./ui) consumes the JSON API
+above and renders the data as:
+
+- a dashboard listing past runs with status, timestamp, duration and the
+  invoked command;
+- a per-run detail page with a Gantt waterfall of the trace's spans and a
+  console-style log viewer that can be filtered to a clicked span.
+
+Run it alongside the API in dev:
+
+```sh
+go run ./cmd/otelhouse-api -addr :8080 \
+    -dsn "clickhouse://otel:otel@localhost:9000/otel" &
+cd ui
+npm install
+npm run dev   # http://localhost:5173, proxies /api -> :8080
+```
+
+`npm run build` emits a static bundle under `ui/build/` for production
+deployments behind a reverse proxy.
 
 ## Testing with Dagger's own OTel data
 

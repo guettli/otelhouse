@@ -8,11 +8,18 @@ import (
 
 // queryRuns returns up to `limit` distinct runs, newest first. A run is
 // identified by its TraceId and projected with the service name, the
-// earliest span start, the latest span end (start + duration), and the
-// resource attributes of one representative span.
+// earliest span start, the latest span end (start + duration), the
+// resource attributes of one representative span, and the root span's
+// status code and command (dagger.cmd attribute or span name).
 func (s *Server) queryRuns(ctx context.Context, limit int) ([]Run, error) {
 	// Duration is stored as Int64 by this package and as UInt64 by the
 	// upstream OTel Collector clickhouse exporter; toInt64 normalises both.
+	//
+	// Root spans are identified by ParentSpanId being empty or 16 zero
+	// hex digits — this package's exporter writes the latter, the upstream
+	// Collector exporter writes the former, so the check accepts both.
+	// dagger.cmd is the Dagger CLI's invoked-command attribute; we fall
+	// back to SpanName when it's absent (non-Dagger producers, library use).
 	query := fmt.Sprintf(`
 SELECT
     TraceId,
@@ -20,7 +27,10 @@ SELECT
     min(Timestamp)                                                     AS StartTime,
     max(toUnixTimestamp64Nano(Timestamp) + toInt64(Duration))          AS EndUnixNano,
     count()                                                            AS SpanCount,
-    any(ResourceAttributes)                                            AS ResourceAttributes
+    any(ResourceAttributes)                                            AS ResourceAttributes,
+    anyIf(StatusCode, ParentSpanId = '' OR ParentSpanId = '0000000000000000')                                AS RootStatusCode,
+    anyIf(SpanAttributes['dagger.cmd'], ParentSpanId = '' OR ParentSpanId = '0000000000000000')              AS RootDaggerCmd,
+    anyIf(SpanName, ParentSpanId = '' OR ParentSpanId = '0000000000000000')                                  AS RootSpanName
 FROM %s
 GROUP BY TraceId
 ORDER BY StartTime DESC
@@ -36,8 +46,10 @@ LIMIT ?
 	runs := make([]Run, 0)
 	for rows.Next() {
 		var (
-			run         Run
-			endUnixNano int64
+			run           Run
+			endUnixNano   int64
+			rootDaggerCmd string
+			rootSpanName  string
 		)
 		if err := rows.Scan(
 			&run.TraceID,
@@ -46,6 +58,9 @@ LIMIT ?
 			&endUnixNano,
 			&run.SpanCount,
 			&run.ResourceAttributes,
+			&run.StatusCode,
+			&rootDaggerCmd,
+			&rootSpanName,
 		); err != nil {
 			return nil, fmt.Errorf("scan run: %w", err)
 		}
@@ -54,6 +69,11 @@ LIMIT ?
 		run.DurationNs = endUnixNano - run.StartTime.UnixNano()
 		if run.DurationNs < 0 {
 			run.DurationNs = 0
+		}
+		if rootDaggerCmd != "" {
+			run.Command = rootDaggerCmd
+		} else {
+			run.Command = rootSpanName
 		}
 		runs = append(runs, run)
 	}
