@@ -168,7 +168,13 @@ func runCollectorHarness(
 		WithFile("/etc/otelcol/config.yaml", src.File("ci/otel-collector-config.yaml")).
 		WithExposedPort(4317).
 		WithExposedPort(4318).
-		WithExec([]string{"--config=/etc/otelcol/config.yaml"}).
+		// UseEntrypoint prepends the image's ENTRYPOINT
+		// (/otelcol-contrib) — without it, Dagger tries to exec
+		// "--config=..." as a binary.
+		WithExec(
+			[]string{"--config=/etc/otelcol/config.yaml"},
+			dagger.ContainerWithExecOpts{UseEntrypoint: true},
+		).
 		AsService()
 
 	// telemetrygen blocks until it has sent the requested count over OTLP
@@ -192,12 +198,18 @@ func runCollectorHarness(
 			WithNewFile("/etc/group", distrolessRootGroup).
 			WithUser("0").
 			WithServiceBinding("otelcol", collector).
-			WithExec([]string{
-				"telemetrygen", e.subcommand,
-				"--otlp-endpoint", "otelcol:4317",
-				"--otlp-insecure",
-				e.countFlag, "20",
-			}).
+			// UseEntrypoint prepends the image's ENTRYPOINT
+			// (/telemetrygen) — there's no shell or PATH in the scratch
+			// image to find it otherwise.
+			WithExec(
+				[]string{
+					e.subcommand,
+					"--otlp-endpoint", "otelcol:4317",
+					"--otlp-insecure",
+					e.countFlag, "20",
+				},
+				dagger.ContainerWithExecOpts{UseEntrypoint: true},
+			).
 			Sync(ctx); err != nil {
 			return fmt.Errorf("telemetrygen %s: %w", e.subcommand, err)
 		}
