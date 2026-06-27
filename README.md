@@ -42,3 +42,25 @@ The pipeline runs:
 3. `golangci-lint` — lint (`v2.12.2`)
 4. `go build` — compilation
 5. `go test` — integration tests against a live ClickHouse 25.5 service
+
+## Connecting traces and logs
+
+The upstream `clickhouseexporter` writes `TraceId` and `SpanId` columns to
+both `otel_traces` and `otel_logs`, so a log emitted inside an active span
+joins back to that span with no custom schema:
+
+```sql
+SELECT t.SpanName, l.Body
+FROM otel_traces  t
+JOIN otel_logs    l USING (TraceId, SpanId)
+```
+
+For the join to work, producers must emit log records while a span is
+active — start the span (`tracer.Start(ctx, ...)`) before the log call so
+the OTel SDK stamps the span context onto the record. A log with an empty
+`SpanId` cannot be linked to a span, and a Collector pipeline that strips
+`TraceId`/`SpanId` (e.g. via `attributes/delete`) breaks the join.
+
+This is the data foundation the API ([#26](https://github.com/guettli/otelhouse/issues/26))
+and visualization UI ([#27](https://github.com/guettli/otelhouse/issues/27))
+build on to render hyperlinks between a span and its logs (and back).
