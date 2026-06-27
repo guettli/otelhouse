@@ -141,6 +141,12 @@ func runCollectorHarness(
 
 	collector := client.Container().
 		From(collectorImage).
+		// The upstream collector image declares USER 10001 but that UID
+		// is missing from /etc/passwd in the base layer, and Dagger
+		// refuses to exec into an unresolvable user. Run as root — this
+		// is an ephemeral CI container with no security surface, and the
+		// collector itself does no privileged work.
+		WithUser("0").
 		WithServiceBinding("clickhouse", clickhouse).
 		// The YAML reads these via ${env:...} so credentials stay defined
 		// once in this file.
@@ -169,6 +175,12 @@ func runCollectorHarness(
 	for _, e := range emissions {
 		if _, err := client.Container().
 			From(telemetrygenImage).
+			// The upstream telemetrygen image declares USER 10001, but
+			// that UID is absent from /etc/passwd in the base image and
+			// Dagger refuses to exec into an unresolvable user. Run as
+			// root — this is an ephemeral CI container with no security
+			// surface.
+			WithUser("0").
 			WithServiceBinding("otelcol", collector).
 			WithExec([]string{
 				"telemetrygen", e.subcommand,
