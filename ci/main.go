@@ -14,11 +14,15 @@ import (
 const otelCollectorVersion = "0.114.0"
 
 // Both the otel-collector-contrib and telemetrygen images are built FROM
-// scratch and ship no /etc/passwd. Dagger's container runtime refuses to
-// exec into a UID it can't resolve, so we inject this minimal root entry
-// before exec'ing and run as root — these are ephemeral CI containers on
-// a private Dagger service network with no security surface.
-const distrolessRootPasswd = "root:x:0:0:root:/:/sbin/nologin\n"
+// scratch and ship neither /etc/passwd nor /etc/group. Dagger's container
+// runtime refuses to exec into a UID/GID it can't resolve, so we inject
+// minimal root entries and run as root — these are ephemeral CI
+// containers on a private Dagger service network with no security
+// surface.
+const (
+	distrolessRootPasswd = "root:x:0:0:root:/:/sbin/nologin\n"
+	distrolessRootGroup  = "root:x:0:\n"
+)
 
 // ClickHouse credentials used by every component in the harness (the server,
 // the collector exporter, query containers). Centralised here so the YAML
@@ -149,8 +153,10 @@ func runCollectorHarness(
 	collector := client.Container().
 		From(collectorImage).
 		// See distrolessRootPasswd: the upstream image is FROM scratch
-		// and has no /etc/passwd, so even UID 0 can't be resolved.
+		// and has no /etc/passwd or /etc/group, so neither UID 0 nor
+		// GID 0 can be resolved.
 		WithNewFile("/etc/passwd", distrolessRootPasswd).
+		WithNewFile("/etc/group", distrolessRootGroup).
 		WithUser("0").
 		WithServiceBinding("clickhouse", clickhouse).
 		// The YAML reads these via ${env:...} so credentials stay defined
@@ -183,6 +189,7 @@ func runCollectorHarness(
 			// See distrolessRootPasswd: same scratch-image situation as
 			// the collector above.
 			WithNewFile("/etc/passwd", distrolessRootPasswd).
+			WithNewFile("/etc/group", distrolessRootGroup).
 			WithUser("0").
 			WithServiceBinding("otelcol", collector).
 			WithExec([]string{
