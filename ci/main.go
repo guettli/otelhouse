@@ -8,6 +8,13 @@ import (
 	"dagger.io/dagger"
 )
 
+// Pinned upstream component versions. Keep both tags identical so the
+// telemetrygen we use to produce sample data is built from the same contrib
+// tree as the Collector that ingests it. The clickhouseexporter metrics
+// support is still alpha (#43), so this pin is the source of truth for the
+// on-disk schema in ClickHouse.
+const otelContribTag = "0.120.0"
+
 func main() {
 	ctx := context.Background()
 	if err := pipeline(ctx); err != nil {
@@ -24,9 +31,8 @@ func pipeline(ctx context.Context) error {
 	defer func() { _ = client.Close() }()
 
 	// Mount the whole repo (minus .git/). The Go checks below run from
-	// /src/ci where the only Go module now lives; later harness steps will
-	// also need access to non-Go assets at the repo root (Collector config,
-	// sample-data fixtures, etc.).
+	// /src/ci where the only Go module now lives; the Collector config under
+	// collector/ is mounted into its own container further down.
 	src := client.Host().Directory("..", dagger.HostDirectoryOpts{
 		Exclude: []string{".git/"},
 	})
@@ -34,11 +40,10 @@ func pipeline(ctx context.Context) error {
 	goMod := client.CacheVolume("otelhouse-go-mod")
 	goBuild := client.CacheVolume("otelhouse-go-build")
 
-	// Ephemeral ClickHouse for the integration harness. Kept available for
-	// the next pipeline step (Collector + sample-data generation); the
-	// credentials are set explicitly because the image generates a random
-	// password for the default user when no CLICKHOUSE_* env vars are given,
-	// which makes the empty-password DSN fail with auth errors.
+	// Ephemeral ClickHouse for the integration harness. Credentials are set
+	// explicitly because the image generates a random password for the default
+	// user when no CLICKHOUSE_* env vars are given, which would make the
+	// empty-password DSN fail with auth errors.
 	clickhouse := client.Container().
 		From("clickhouse/clickhouse-server:25.5").
 		WithEnvVariable("CLICKHOUSE_USER", "test").
@@ -47,6 +52,21 @@ func pipeline(ctx context.Context) error {
 		WithExposedPort(9000).
 		WithExposedPort(8123).
 		AsService()
+
+	// Upstream OTel Collector contrib build wired to the ClickHouse service.
+	// The same `clickhouse` handle is reused below for the test container so
+	// both containers share one ClickHouse instance and the data written here
+	// is visible to the test queries.
+	collector := client.Container().
+		From("otel/opentelemetry-collector-contrib:"+otelContribTag).
+		WithServiceBinding("clickhouse", clickhouse).
+		WithMountedFile("/etc/otelcol/config.yaml", src.File("collector/config.yaml")).
+		WithExposedPort(4317).
+		WithExposedPort(4318).
+		AsService(dagger.ContainerAsServiceOpts{
+			Args:          []string{"--config=/etc/otelcol/config.yaml"},
+			UseEntrypoint: true,
+		})
 
 	goBase := client.Container().
 		From("golang:1.26-alpine").
@@ -83,13 +103,33 @@ func pipeline(ctx context.Context) error {
 		return fmt.Errorf("go build: %w", err)
 	}
 
-	// Integration tests. The ci/ module currently has no _test.go files, so
-	// this is a vacuous pass; the ClickHouse service binding stays wired up
-	// so the next pipeline step can add Collector-driven tests without
-	// re-introducing the service plumbing.
+	// Push sample metrics into the Collector via the upstream telemetrygen so
+	// the integration test has data to assert against. Running this as a
+	// one-shot container avoids adding a Go producer to the repo. Sync()
+	// blocks until telemetrygen exits, by which time the Collector has the
+	// metrics in flight; the test below polls for them to land.
+	if _, err = client.Container().
+		From("ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:"+otelContribTag).
+		WithServiceBinding("collector", collector).
+		WithExec(
+			[]string{
+				"metrics",
+				"--otlp-endpoint", "collector:4317",
+				"--otlp-insecure",
+				"--metrics", "50",
+			},
+			dagger.ContainerWithExecOpts{UseEntrypoint: true},
+		).Sync(ctx); err != nil {
+		return fmt.Errorf("telemetrygen metrics: %w", err)
+	}
+
+	// Integration tests. The metrics test polls ClickHouse over HTTP for the
+	// rows produced above; the Collector flush is asynchronous so the test
+	// retries on its own deadline.
 	if _, err = goBase.
 		WithServiceBinding("clickhouse", clickhouse).
 		WithEnvVariable("CLICKHOUSE_DSN", "clickhouse://test:test@clickhouse:9000/test").
+		WithEnvVariable("CLICKHOUSE_HTTP_URL", "http://test:test@clickhouse:8123/").
 		WithExec([]string{"go", "test", "-v", "-count=1", "./..."}).
 		Sync(ctx); err != nil {
 		return fmt.Errorf("go test: %w", err)

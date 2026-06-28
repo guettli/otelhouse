@@ -1,0 +1,63 @@
+# OpenTelemetry Collector configuration used by the Dagger harness.
+#
+# This is the only Collector config in the repo: the same pipeline runs in
+# `make test` and in CI. The clickhouseexporter owns the schema; per #43 its
+# metrics support is still alpha, so the contrib image tag pinned in
+# ci/main.go is the source of truth for what the on-disk tables look like.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Small batch timeout so the integration test does not wait long for data
+  # to land in ClickHouse after telemetrygen exits.
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+exporters:
+  clickhouse:
+    endpoint: tcp://clickhouse:9000?username=test&password=test&database=test&dial_timeout=10s
+    database: test
+    username: test
+    password: test
+    # Let the exporter manage its schema; with create_schema=false the harness
+    # would need to ship and version DDL of its own.
+    create_schema: true
+    # Tests are ephemeral; keep TTL short so a long-running engine does not
+    # accumulate state across runs.
+    ttl: 24h
+    timeout: 10s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 5s
+
+service:
+  # Traces and logs pipelines are wired up alongside metrics so the same
+  # config covers all three signals once producers exist for them.
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]
+  telemetry:
+    logs:
+      level: info

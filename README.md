@@ -136,3 +136,37 @@ This is the data foundation the API
 ([#26](https://github.com/guettli/otelhouse/issues/26)) and the
 visualization UI ([#27](https://github.com/guettli/otelhouse/issues/27))
 build on to render hyperlinks between a span and its logs (and back).
+
+## Connecting metrics to traces and logs
+
+Metrics carry less context than a span or log record, so the upstream
+`clickhouseexporter` writes them into per-type tables — `otel_metrics_gauge`,
+`otel_metrics_sum`, `otel_metrics_histogram`,
+`otel_metrics_exponential_histogram` and `otel_metrics_summary` — and
+correlation works at two levels:
+
+**Coarse correlation by service / resource.** Every signal table — traces,
+logs and the metric tables alike — carries `ServiceName` and
+`ResourceAttributes`, so dashboards pivot on those without any per-row link.
+
+**Fine correlation via exemplars.** `otel_metrics_sum`, `otel_metrics_histogram`
+and `otel_metrics_exponential_histogram` have an `Exemplars Nested(TraceId
+String, SpanId String, ...)` column. Producers that record measurements
+while a span is active get exemplars stamped with the active `TraceId` /
+`SpanId`, so a single metric data point joins back to its originating trace
+— and from there to logs via the trace/log join above:
+
+```sql
+SELECT m.MetricName, e.TraceId, t.SpanName
+FROM otel_metrics_sum  m
+ARRAY JOIN m.Exemplars AS e
+JOIN otel_traces       t USING (TraceId)
+WHERE m.ServiceName = 'checkout'
+```
+
+Metrics ingestion is **alpha** in the upstream `clickhouseexporter` and the
+schema may shift between releases. The contrib image tag pinned in
+`ci/main.go` (`otelContribTag`) is the source of truth for what the tables
+actually look like at any commit — the Dagger harness runs an end-to-end
+test (`telemetrygen` → Collector → ClickHouse) against that pin so a green
+CI run implies the metric tables are populated with the expected shape.
