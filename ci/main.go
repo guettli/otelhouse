@@ -13,16 +13,6 @@ import (
 // clickhouseexporter creates on first insert; bump when the schema changes.
 const otelCollectorVersion = "0.114.0"
 
-// The otel-collector-contrib image is built FROM scratch and ships neither
-// /etc/passwd nor /etc/group. Dagger's container runtime refuses to exec
-// into a UID/GID it can't resolve, so we inject minimal root entries and
-// run as root — these are ephemeral CI containers on a private Dagger
-// service network with no security surface.
-const (
-	distrolessRootPasswd = "root:x:0:0:root:/:/sbin/nologin\n"
-	distrolessRootGroup  = "root:x:0:\n"
-)
-
 // ClickHouse credentials used by every component in the harness (server,
 // collector exporter, query containers). Centralised here so the YAML stays
 // generic and consumes them via ${env:...}.
@@ -228,23 +218,29 @@ func logStep(msg string) {
 	fmt.Fprintf(os.Stderr, "[e2e %s] %s\n", time.Now().UTC().Format(time.RFC3339), msg)
 }
 
-// buildCollectorService stands up the upstream otel-collector-contrib image
+// buildCollectorService stands up the upstream otel-collector-contrib binary
 // as a Dagger service, wired to the ClickHouse service via service binding
 // and configured by ci/otel-collector-config.yaml.
+//
+// The binary is extracted from the upstream distroless image and run on top
+// of alpine. The distroless image (FROM scratch) is unusable as a Dagger
+// service in Dagger v0.21.7: the collector boots and serves on its ports,
+// but Dagger's service-readiness probe never reports the ports as ready and
+// every dependent WithServiceBinding hangs until the context expires.
+// Putting the same binary on a normal Linux base image makes the service
+// behave like any other Dagger service.
 func buildCollectorService(
 	client *dagger.Client,
 	clickhouse *dagger.Service,
 	src *dagger.Directory,
 ) *dagger.Service {
 	collectorImage := fmt.Sprintf("otel/opentelemetry-collector-contrib:%s", otelCollectorVersion)
+	collectorBin := client.Container().From(collectorImage).File("/otelcol-contrib")
+
 	return client.Container().
-		From(collectorImage).
-		// See distrolessRootPasswd: the upstream image is FROM scratch and
-		// has no /etc/passwd or /etc/group, so neither UID 0 nor GID 0 can
-		// be resolved.
-		WithNewFile("/etc/passwd", distrolessRootPasswd).
-		WithNewFile("/etc/group", distrolessRootGroup).
-		WithUser("0").
+		From("alpine:3.20").
+		WithFile("/usr/local/bin/otelcol-contrib", collectorBin).
+		WithFile("/etc/otelcol/config.yaml", src.File("ci/otel-collector-config.yaml")).
 		WithServiceBinding("clickhouse", clickhouse).
 		// The YAML reads these via ${env:...} so credentials stay defined
 		// once in this file.
@@ -252,17 +248,14 @@ func buildCollectorService(
 		WithEnvVariable("CLICKHOUSE_DB", clickhouseDB).
 		WithEnvVariable("CLICKHOUSE_USER", clickhouseUser).
 		WithEnvVariable("CLICKHOUSE_PASSWORD", clickhousePassword).
-		WithFile("/etc/otelcol/config.yaml", src.File("ci/otel-collector-config.yaml")).
 		// Only the OTLP gRPC port is consumed by the emitter; exposing the
 		// HTTP port too (4318) adds an extra Dagger TCP healthcheck for no
 		// benefit and was a candidate root cause for the #50 hang.
 		WithExposedPort(4317).
-		// UseEntrypoint prepends the image's ENTRYPOINT (/otelcol-contrib)
-		// — without it, Dagger tries to exec "--config=..." as a binary.
-		WithExec(
-			[]string{"--config=/etc/otelcol/config.yaml"},
-			dagger.ContainerWithExecOpts{UseEntrypoint: true},
-		).
+		WithExec([]string{
+			"/usr/local/bin/otelcol-contrib",
+			"--config=/etc/otelcol/config.yaml",
+		}).
 		AsService()
 }
 
