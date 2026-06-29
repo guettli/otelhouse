@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"dagger.io/dagger"
 )
@@ -149,19 +150,32 @@ func runE2E(
 	src *dagger.Directory,
 	goBase *dagger.Container,
 ) error {
+	// Cap the whole e2e step. The pipeline previously hung at 6h on a
+	// distroless-image issue; an explicit deadline turns a hang into a
+	// timely, debuggable failure.
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+	defer cancel()
+
+	logStep("collector: starting otel-collector-contrib service")
 	collector := buildCollectorService(client, clickhouse, src)
 
+	logStep("emitter: building otelhouse-emit binary")
 	emitter := buildEmitter(goBase)
+
+	logStep("emitter: driving OTLP traces/metrics/logs into collector")
 	if err := runEmitter(ctx, emitter, collector); err != nil {
 		return err
 	}
 
+	logStep("verify: polling clickhouse for rows in upstream tables")
 	if err := verifyRows(ctx, client, clickhouse); err != nil {
 		return err
 	}
 
+	logStep("api: building otelhouse-api and starting as service")
 	api := buildAPIService(goBase, clickhouseDSN, clickhouse)
 
+	logStep("e2e: running go test -tags e2e against the live API")
 	// Run the e2e Go test. The test is gated by the `e2e` build tag, so
 	// passing -tags e2e here picks it up. The fixed log TraceID is exposed
 	// to the test so it can query /api/logs?traceId=... deterministically.
@@ -176,7 +190,14 @@ func runE2E(
 		Sync(ctx); err != nil {
 		return fmt.Errorf("e2e test: %w", err)
 	}
+	logStep("e2e: all assertions passed")
 	return nil
+}
+
+// logStep prints a timestamped progress marker to stderr so a hang in the
+// Dagger pipeline can be pinpointed to a specific step from CI logs.
+func logStep(msg string) {
+	fmt.Fprintf(os.Stderr, "[e2e %s] %s\n", time.Now().UTC().Format(time.RFC3339), msg)
 }
 
 // buildCollectorService stands up the upstream otel-collector-contrib image
