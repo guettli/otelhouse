@@ -158,9 +158,29 @@ func runE2E(
 
 	logStep("collector: starting otel-collector-contrib service")
 	collector := buildCollectorService(client, clickhouse, src)
+	// Force the collector to start (and pass its port healthchecks) eagerly,
+	// before any container binds to it. The previous CI run lazily started
+	// the collector via the emitter's WithServiceBinding; the collector logged
+	// "Everything is ready" but Dagger never moved on to building or running
+	// the emitter, and the whole step died on the 20m deadline with a generic
+	// "Post http://dagger/query: context deadline exceeded" — see #50.
+	// Starting eagerly here means a stuck startup fails at this step with the
+	// collector's own logs attached, instead of a silent hang in the emitter.
+	collector, err := collector.Start(ctx)
+	if err != nil {
+		return fmt.Errorf("start collector: %w", err)
+	}
+	logStep("collector: service is up")
 
 	logStep("emitter: building otelhouse-emit binary")
 	emitter := buildEmitter(goBase)
+	// Materialise the build before any service binding/emission, so a build
+	// failure surfaces as a build failure (and the binary is cached for the
+	// three subsequent emission containers).
+	emitter, err = emitter.Sync(ctx)
+	if err != nil {
+		return fmt.Errorf("build emitter: %w", err)
+	}
 
 	logStep("emitter: driving OTLP traces/metrics/logs into collector")
 	if err := runEmitter(ctx, emitter, collector); err != nil {
@@ -174,6 +194,14 @@ func runE2E(
 
 	logStep("api: building otelhouse-api and starting as service")
 	api := buildAPIService(goBase, clickhouseDSN, clickhouse)
+	// Same rationale as the collector: start the API eagerly so any startup
+	// failure (e.g. DSN auth, port bind, ClickHouse connectivity) is reported
+	// here rather than as an opaque hang in the e2e go test step below.
+	api, err = api.Start(ctx)
+	if err != nil {
+		return fmt.Errorf("start api: %w", err)
+	}
+	logStep("api: service is up")
 
 	logStep("e2e: running go test -tags e2e against the live API")
 	// Run the e2e Go test. The test is gated by the `e2e` build tag, so
@@ -225,8 +253,10 @@ func buildCollectorService(
 		WithEnvVariable("CLICKHOUSE_USER", clickhouseUser).
 		WithEnvVariable("CLICKHOUSE_PASSWORD", clickhousePassword).
 		WithFile("/etc/otelcol/config.yaml", src.File("ci/otel-collector-config.yaml")).
+		// Only the OTLP gRPC port is consumed by the emitter; exposing the
+		// HTTP port too (4318) adds an extra Dagger TCP healthcheck for no
+		// benefit and was a candidate root cause for the #50 hang.
 		WithExposedPort(4317).
-		WithExposedPort(4318).
 		// UseEntrypoint prepends the image's ENTRYPOINT (/otelcol-contrib)
 		// — without it, Dagger tries to exec "--config=..." as a binary.
 		WithExec(
