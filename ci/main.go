@@ -8,9 +8,8 @@ import (
 	"dagger.io/dagger"
 )
 
-// Pinned upstream OTel Collector contrib + telemetrygen versions. Bump
-// together so the collector schema (created by the clickhouseexporter on
-// first insert) and the emitter stay in sync.
+// Pinned upstream OTel Collector contrib image. Drives the schema the
+// clickhouseexporter creates on first insert; bump when the schema changes.
 const otelCollectorVersion = "0.114.0"
 
 // The otel-collector-contrib image is built FROM scratch and ships neither
@@ -123,10 +122,10 @@ func pipeline(ctx context.Context) error {
 	}
 
 	// End-to-end test: Dagger → OTLP → Collector → ClickHouse → API.
-	// Stands up the Collector + telemetrygen + otelhouse-api binary as
+	// Stands up the Collector + otelhouse-emit + otelhouse-api binary as
 	// Dagger services and runs the e2e Go test that hits the API and
 	// asserts the responses.
-	if err = runE2E(ctx, client, clickhouse, clickhouseDSN, src, goMod, goBuild, goBase); err != nil {
+	if err = runE2E(ctx, client, clickhouse, clickhouseDSN, src, goBase); err != nil {
 		return fmt.Errorf("e2e: %w", err)
 	}
 
@@ -136,9 +135,9 @@ func pipeline(ctx context.Context) error {
 
 // runE2E orchestrates the end-to-end harness: stand up the upstream OTel
 // Collector wired to ClickHouse, drive sample OTLP traces/logs/metrics into
-// it with telemetrygen, build and run the otelhouse-api binary as a Dagger
-// service, and run the Go e2e test that hits the API and asserts the
-// responses.
+// it with the in-repo otelhouse-emit binary, build and run the otelhouse-api
+// binary as a Dagger service, and run the Go e2e test that hits the API
+// and asserts the responses.
 //
 // The Collector owns the schema via clickhouseexporter (create_schema: true).
 // otelhouse contains no exporter code of its own — see issues #29 / #37.
@@ -148,13 +147,12 @@ func runE2E(
 	clickhouse *dagger.Service,
 	clickhouseDSN string,
 	src *dagger.Directory,
-	goMod, goBuild *dagger.CacheVolume,
 	goBase *dagger.Container,
 ) error {
 	collector := buildCollectorService(client, clickhouse, src)
 
-	telemetrygen := buildTelemetrygen(client, goMod, goBuild)
-	if err := runTelemetrygen(ctx, telemetrygen, collector); err != nil {
+	emitter := buildEmitter(goBase)
+	if err := runEmitter(ctx, emitter, collector); err != nil {
 		return err
 	}
 
@@ -217,52 +215,45 @@ func buildCollectorService(
 		AsService()
 }
 
-// buildTelemetrygen builds the telemetrygen CLI from source in a regular
-// golang:alpine container.
-//
-// We avoid the published distroless image (ghcr.io/.../telemetrygen): it is
-// a multi-arch OCI index with attestation manifests, and Dagger v0.21.7
-// hangs indefinitely trying to resolve it. Building from source via
-// `go install` is a few seconds with the cache mounts and gives us a normal
-// Alpine runtime (real /etc/passwd, shell, PATH).
-func buildTelemetrygen(
-	client *dagger.Client,
-	goMod, goBuild *dagger.CacheVolume,
-) *dagger.Container {
-	pkg := fmt.Sprintf(
-		"github.com/open-telemetry/opentelemetry-collector-contrib/cmd/telemetrygen@v%s",
-		otelCollectorVersion,
-	)
-	return client.Container().
-		From("golang:1.26-alpine").
-		WithMountedCache("/go/pkg/mod", goMod).
-		WithMountedCache("/root/.cache/go-build", goBuild).
-		WithEnvVariable("CGO_ENABLED", "0").
-		WithExec([]string{"go", "install", pkg})
-}
-
-// E2ELogsTraceID is the constant TraceID telemetrygen stamps onto every
-// generated log record. The e2e test in ci/e2e_test.go reads this and
-// queries /api/logs?traceId=E2ELogsTraceID, so the assertion does not have
-// to discover the id at runtime by querying ClickHouse for a random row.
+// e2eLogsTraceID is the constant TraceID the local emitter stamps onto
+// every generated log record. The e2e test reads this and queries
+// /api/logs?traceId=e2eLogsTraceID, so the assertion does not have to
+// discover the id at runtime by querying ClickHouse for a random row.
 const e2eLogsTraceID = "1234567890abcdef1234567890abcdef"
 
-// e2eLogsSpanID pairs with e2eLogsTraceID — telemetrygen requires a valid
-// SpanID alongside the TraceID flag.
+// e2eLogsSpanID pairs with e2eLogsTraceID.
 const e2eLogsSpanID = "1234567890abcdef"
 
-// runTelemetrygen drives sample OTLP traces, metrics and logs into the
-// Collector. telemetrygen blocks until it has sent the requested count
-// over OTLP and received the receiver-level ack from the collector; the
-// batch processor (1s timeout) then flushes to ClickHouse asynchronously,
-// which is what verifyRows and the e2e test poll for.
+// buildEmitter compiles the in-repo otelhouse-emit binary inside goBase.
 //
-// Traces and metrics use telemetrygen's default random ids. Logs are
-// stamped with a fixed TraceID/SpanID so the e2e test can assert
+// We deliberately do not use the upstream telemetrygen here: `go install
+// github.com/open-telemetry/opentelemetry-collector-contrib/cmd/telemetrygen`
+// pulls the entire opentelemetry-collector-contrib dependency tree (every
+// receiver, processor and exporter in contrib), which takes 10+ minutes on
+// a cold CI cache and timed out the workflow. The local emitter under
+// ci/cmd/otelhouse-emit uses only the OTel Go SDK and OTLP exporters and
+// shares the goBase Go module cache that the gofmt / vet / build / test
+// steps already populated.
+func buildEmitter(goBase *dagger.Container) *dagger.Container {
+	return goBase.WithExec([]string{
+		"go", "build",
+		"-o", "/usr/local/bin/otelhouse-emit",
+		"./cmd/otelhouse-emit",
+	})
+}
+
+// runEmitter drives sample OTLP traces, metrics and logs into the Collector.
+// The emitter blocks until it has sent the requested count over OTLP and
+// flushed; the Collector's batch processor (1s timeout) then writes to
+// ClickHouse asynchronously, which is what verifyRows and the e2e test poll
+// for.
+//
+// Traces and metrics use the OTel SDK's default random ids. Logs are stamped
+// with a fixed TraceID/SpanID so the e2e test can assert
 // /api/logs?traceId=... returns deterministic content.
-func runTelemetrygen(
+func runEmitter(
 	ctx context.Context,
-	telemetrygen *dagger.Container,
+	emitter *dagger.Container,
 	collector *dagger.Service,
 ) error {
 	emissions := []struct {
@@ -272,32 +263,31 @@ func runTelemetrygen(
 		{"traces", nil},
 		{"metrics", nil},
 		{"logs", []string{
-			"--trace-id", e2eLogsTraceID,
-			"--span-id", e2eLogsSpanID,
+			"-trace-id", e2eLogsTraceID,
+			"-span-id", e2eLogsSpanID,
 		}},
 	}
 	for _, e := range emissions {
 		args := []string{
-			"/go/bin/telemetrygen", e.signal,
-			"--otlp-endpoint", "otelcol:4317",
-			"--otlp-insecure",
-			"--" + e.signal, "20",
+			"/usr/local/bin/otelhouse-emit",
+			"-signal", e.signal,
+			"-endpoint", "otelcol:4317",
+			"-count", "20",
 		}
 		args = append(args, e.extra...)
-		if _, err := telemetrygen.
+		if _, err := emitter.
 			WithServiceBinding("otelcol", collector).
 			WithExec(args).
 			Sync(ctx); err != nil {
-			return fmt.Errorf("telemetrygen %s: %w", e.signal, err)
+			return fmt.Errorf("emit %s: %w", e.signal, err)
 		}
 	}
 	return nil
 }
 
 // verifyRows polls ClickHouse until each upstream-schema table expected for
-// the signals we emitted has at least one row, or fails after ~30s.
-// telemetrygen defaults to Gauge metrics, so we check otel_metrics_gauge
-// specifically.
+// the signals we emitted has at least one row, or fails after ~30s. The
+// emitter records gauge metrics, so we check otel_metrics_gauge specifically.
 func verifyRows(ctx context.Context, client *dagger.Client, clickhouse *dagger.Service) error {
 	script := fmt.Sprintf(`set -eu
 tables="otel_traces otel_logs otel_metrics_gauge"

@@ -116,7 +116,8 @@ The pipeline runs:
    `otel/opentelemetry-collector-contrib` (with
    [`ci/otel-collector-config.yaml`](ci/otel-collector-config.yaml))
    pointed at the same ClickHouse service, drives sample OTLP
-   traces/metrics/logs into it with `telemetrygen`, runs the
+   traces/metrics/logs into it with the in-repo `otelhouse-emit`
+   binary, runs the
    `otelhouse-api` binary as a Dagger service against ClickHouse, and
    runs the `TestE2E_API` Go test (build tag `e2e`) which hits
    `/api/runs`, `/api/traces/:id` and `/api/logs?traceId=:id` and asserts
