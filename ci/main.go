@@ -64,20 +64,34 @@ func pipeline(ctx context.Context) error {
 	// generated gitleaks redaction fragment. The Collector deep-merges them
 	// at startup, which is how the pipelines in config.yaml resolve the
 	// transform/redaction processor defined in redaction.yaml.
+	//
+	// The binary is extracted from the upstream distroless image and run on
+	// top of alpine because the distroless image (FROM scratch) is unusable
+	// as a Dagger service in Dagger v0.21.7: the collector boots and serves
+	// on its ports, but Dagger's service-readiness probe never reports the
+	// ports as ready and every dependent WithServiceBinding hangs until the
+	// context expires. ExperimentalSkipHealthcheck on the OTLP gRPC port is
+	// the second half of the workaround — Dagger's TCP probe still hangs
+	// against the OTLP gRPC port even on alpine; the OTLP gRPC exporter on
+	// the producer side has its own retry/backoff for the few hundred ms
+	// before the collector is actually listening.
+	collectorImage := "otel/opentelemetry-collector-contrib:" + otelContribTag
+	collectorBin := client.Container().From(collectorImage).File("/otelcol-contrib")
 	collector := client.Container().
-		From("otel/opentelemetry-collector-contrib:"+otelContribTag).
-		WithServiceBinding("clickhouse", clickhouse).
+		From("alpine:3.20").
+		WithFile("/usr/local/bin/otelcol-contrib", collectorBin).
 		WithMountedFile("/etc/otelcol/config.yaml", src.File("collector/config.yaml")).
 		WithMountedFile("/etc/otelcol/redaction.yaml", src.File("collector/redaction.yaml")).
-		WithExposedPort(4317).
-		WithExposedPort(4318).
-		AsService(dagger.ContainerAsServiceOpts{
-			Args: []string{
-				"--config=/etc/otelcol/config.yaml",
-				"--config=/etc/otelcol/redaction.yaml",
-			},
-			UseEntrypoint: true,
-		})
+		WithServiceBinding("clickhouse", clickhouse).
+		WithExposedPort(4317, dagger.ContainerWithExposedPortOpts{
+			ExperimentalSkipHealthcheck: true,
+		}).
+		WithExec([]string{
+			"/usr/local/bin/otelcol-contrib",
+			"--config=/etc/otelcol/config.yaml",
+			"--config=/etc/otelcol/redaction.yaml",
+		}).
+		AsService()
 
 	goBase := client.Container().
 		From("golang:1.26-alpine").
@@ -112,6 +126,15 @@ func pipeline(ctx context.Context) error {
 	// go build
 	if _, err = goBase.WithExec([]string{"go", "build", "./..."}).Sync(ctx); err != nil {
 		return fmt.Errorf("go build: %w", err)
+	}
+
+	// Force the collector to start eagerly so a stuck or misconfigured
+	// transform/redaction processor surfaces here with the collector's own
+	// logs attached, instead of looking like an opaque hang inside the
+	// telemetrygen WithServiceBinding below.
+	collector, err = collector.Start(ctx)
+	if err != nil {
+		return fmt.Errorf("start collector: %w", err)
 	}
 
 	// Push one log carrying fakeAWSAccessKey in its body through the
