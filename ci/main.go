@@ -248,10 +248,22 @@ func buildCollectorService(
 		WithEnvVariable("CLICKHOUSE_DB", clickhouseDB).
 		WithEnvVariable("CLICKHOUSE_USER", clickhouseUser).
 		WithEnvVariable("CLICKHOUSE_PASSWORD", clickhousePassword).
-		// Only the OTLP gRPC port is consumed by the emitter; exposing the
-		// HTTP port too (4318) adds an extra Dagger TCP healthcheck for no
-		// benefit and was a candidate root cause for the #50 hang.
-		WithExposedPort(4317).
+		// Only the OTLP gRPC port is consumed by the emitter; HTTP (4318) is
+		// not exposed.
+		//
+		// ExperimentalSkipHealthcheck: true is what actually unblocks #50.
+		// With the default TCP healthcheck enabled, Dagger v0.21.7 hangs
+		// indefinitely probing the OTLP gRPC port: the collector is up and
+		// serving (its own "Everything is ready" log line appears in CI
+		// before the hang), but Dagger never reports the port as ready and
+		// Service.Start / WithServiceBinding block until the 20m context
+		// expires. Skipping the probe lets the emitter connect directly; the
+		// OTLP gRPC exporter has its own retry/backoff, and the collector
+		// reaches "Everything is ready" in ~2s — well inside the emitter's
+		// 60s per-call context.
+		WithExposedPort(4317, dagger.ContainerWithExposedPortOpts{
+			ExperimentalSkipHealthcheck: true,
+		}).
 		WithExec([]string{
 			"/usr/local/bin/otelcol-contrib",
 			"--config=/etc/otelcol/config.yaml",
