@@ -1,0 +1,64 @@
+# Base OpenTelemetry Collector configuration for the otelhouse Dagger
+# harness. The same pipeline runs in `make test` and in CI.
+#
+# Loaded together with collector/redaction.yaml (which contributes the
+# transform/redaction processor) via two --config flags on the collector
+# binary — the Collector deep-merges multiple YAML configs at startup, so
+# the only place the redaction processor is referenced by name is below in
+# the pipelines.
+#
+# Schema ownership: the upstream clickhouseexporter (create_schema: true)
+# owns the otel_traces / otel_logs / otel_metrics_* tables and creates them
+# on first insert. otelhouse does not maintain a parallel schema.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Small batch timeout so the integration test does not wait long for data
+  # to land in ClickHouse after the producer exits.
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  # processors.transform/redaction is supplied by collector/redaction.yaml.
+
+exporters:
+  clickhouse:
+    endpoint: tcp://clickhouse:9000?username=test&password=test&database=test&dial_timeout=10s
+    database: test
+    username: test
+    password: test
+    create_schema: true
+    ttl: 24h
+    timeout: 10s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 5s
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/redaction, batch]
+      exporters: [clickhouse]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/redaction, batch]
+      exporters: [clickhouse]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [clickhouse]
+  telemetry:
+    logs:
+      level: info

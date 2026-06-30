@@ -49,6 +49,34 @@ Producers in the pipeline are configured against an OTLP/gRPC endpoint
 the same way they would be in production; nothing on the producer side
 is otelhouse-specific.
 
+### Redaction is codeless too
+
+Secrets that leak into log bodies and log/span attributes are scrubbed in
+the Collector before the row hits ClickHouse, with no custom processor:
+
+- `collector/gen-gitleaks-rules/` is a one-shot Go program that reads the
+  pinned [gitleaks](https://github.com/gitleaks/gitleaks) rule pack
+  (`gitleaksVersion` in `main.go`) and emits each rule as an OTTL
+  `replace_pattern` / `replace_all_patterns` statement targeting the log
+  body, log attributes and span attributes.
+- The output, `collector/redaction.yaml`, is committed so reviewers can
+  read the expanded regex set in PRs. It declares a single
+  `transform/redaction` processor that the base `collector/config.yaml`
+  references in its `logs` and `traces` pipelines; the Collector
+  deep-merges the two YAML files at startup via two `--config` flags.
+- A matched secret is replaced with `REDACTED:<gitleaks-rule-id>`, so
+  post-redaction telemetry still indicates which class of secret was
+  scrubbed without revealing the value.
+
+Refresh is "regenerate `redaction.yaml`, commit the diff":
+
+```sh
+go run ./collector/gen-gitleaks-rules -out collector/redaction.yaml
+```
+
+There is no build-time hook that runs the generator — the rule pack
+changes slowly and a silent regen would mask drift.
+
 ## Querying needs custom code
 
 OTel deliberately specifies ingestion (OTLP, semantic conventions) but
