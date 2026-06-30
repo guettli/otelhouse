@@ -31,6 +31,7 @@ go.work.sum
 # .idea/
 # .vscode/
 /ci/ci
+/collector/gen-gitleaks-rules/gen-gitleaks-rules
 
 .vscode
 /*.kubeconfig
