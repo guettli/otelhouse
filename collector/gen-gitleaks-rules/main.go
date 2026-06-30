@@ -197,29 +197,37 @@ func writeConfig(path string, rules []rule) error {
 	b.WriteString("      - context: log\n")
 	b.WriteString("        statements:\n")
 	for _, r := range rules {
-		fmt.Fprintf(&b, "          - %s\n",
-			yamlSingle(fmt.Sprintf(
-				`replace_pattern(body, %s, %s) where IsString(body)`,
-				ottlString(r.regex), ottlString("REDACTED:"+r.id))))
+		fmt.Fprintf(&b, "          - %s\n", emitStatement(fmt.Sprintf(
+			`replace_pattern(body, %s, %s) where IsString(body)`,
+			ottlString(r.regex), ottlString("REDACTED:"+r.id))))
 	}
 	for _, r := range rules {
-		fmt.Fprintf(&b, "          - %s\n",
-			yamlSingle(fmt.Sprintf(
-				`replace_all_patterns(attributes, "value", %s, %s)`,
-				ottlString(r.regex), ottlString("REDACTED:"+r.id))))
+		fmt.Fprintf(&b, "          - %s\n", emitStatement(fmt.Sprintf(
+			`replace_all_patterns(attributes, "value", %s, %s)`,
+			ottlString(r.regex), ottlString("REDACTED:"+r.id))))
 	}
 
 	b.WriteString("    trace_statements:\n")
 	b.WriteString("      - context: span\n")
 	b.WriteString("        statements:\n")
 	for _, r := range rules {
-		fmt.Fprintf(&b, "          - %s\n",
-			yamlSingle(fmt.Sprintf(
-				`replace_all_patterns(attributes, "value", %s, %s)`,
-				ottlString(r.regex), ottlString("REDACTED:"+r.id))))
+		fmt.Fprintf(&b, "          - %s\n", emitStatement(fmt.Sprintf(
+			`replace_all_patterns(attributes, "value", %s, %s)`,
+			ottlString(r.regex), ottlString("REDACTED:"+r.id))))
 	}
 
 	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+// emitStatement YAML-wraps an OTTL statement after escaping for OTel's
+// confmap, which expands ${env:NAME} and $NAME inside *every* config string
+// before the processor ever sees it. gitleaks regexes anchor with $ at
+// end-of-line, e.g. `(?:[\x60'"\s;]|\\[nr]|$)`, and confmap would treat the
+// trailing `$)` as a malformed env-var reference and refuse to load the
+// config. Double every `$` to `$$` — confmap collapses `$$` back to a
+// single `$` after substitution, which then reaches OTTL unchanged.
+func emitStatement(stmt string) string {
+	return yamlSingle(strings.ReplaceAll(stmt, "$", "$$"))
 }
 
 // ottlString quotes s as an OTTL double-quoted string literal. Escapes
