@@ -113,9 +113,6 @@ func pipeline(ctx context.Context) error {
 	}
 
 	// End-to-end test: Dagger → OTLP → Collector → ClickHouse → API.
-	// Stands up the Collector + otelhouse-emit + otelhouse-api binary as
-	// Dagger services and runs the e2e Go test that hits the API and
-	// asserts the responses.
 	if err = runE2E(ctx, client, clickhouse, clickhouseDSN, src, goBase); err != nil {
 		return fmt.Errorf("e2e: %w", err)
 	}
@@ -124,14 +121,23 @@ func pipeline(ctx context.Context) error {
 	return nil
 }
 
-// runE2E orchestrates the end-to-end harness: stand up the upstream OTel
-// Collector wired to ClickHouse, drive sample OTLP traces/logs/metrics into
-// it with the in-repo otelhouse-emit binary, build and run the otelhouse-api
-// binary as a Dagger service, and run the Go e2e test that hits the API
-// and asserts the responses.
+// runE2E orchestrates the end-to-end harness inside ONE Dagger container:
+// the upstream OTel Collector binary, the in-repo otelhouse-emit and
+// otelhouse-api binaries, and the Go e2e test all run as local processes
+// against a single inbound ClickHouse service binding. The Collector owns
+// the ClickHouse schema via clickhouseexporter (create_schema: true);
+// otelhouse contains no exporter code of its own (see #29 / #37).
 //
-// The Collector owns the schema via clickhouseexporter (create_schema: true).
-// otelhouse contains no exporter code of its own — see issues #29 / #37.
+// Why one container, not three Dagger services chained together:
+// previous CI runs (#50) showed that running the collector — or any
+// container that itself has a WithServiceBinding — as a Dagger service
+// hangs the entire step on the deadline (~20m) on Dagger v0.21.7, even
+// with ExperimentalSkipHealthcheck on every exposed port. The collector
+// boots and logs "Everything is ready", but Service.Start never returns.
+// Running collector and API as background processes inside one container
+// removes the chained service binding entirely and uses only the
+// ClickHouse service binding, which is the same pattern the earlier
+// `go test ./...` step already exercises successfully.
 func runE2E(
 	ctx context.Context,
 	client *dagger.Client,
@@ -140,93 +146,42 @@ func runE2E(
 	src *dagger.Directory,
 	goBase *dagger.Container,
 ) error {
-	// Cap the whole e2e step. The pipeline previously hung at 6h on a
-	// distroless-image issue; an explicit deadline turns a hang into a
-	// timely, debuggable failure.
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+	// Cap the whole e2e step. With everything inline this finishes in well
+	// under a minute; the deadline only exists so an unexpected hang turns
+	// into a timely, debuggable failure.
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
-	logStep("collector: starting otel-collector-contrib service")
-	collector := buildCollectorService(client, clickhouse, src)
+	logStep("e2e: extracting otel-collector-contrib binary from upstream image")
+	collectorImage := fmt.Sprintf("otel/opentelemetry-collector-contrib:%s", otelCollectorVersion)
+	collectorBin := client.Container().From(collectorImage).File("/otelcol-contrib")
 
-	logStep("emitter: building otelhouse-emit binary")
-	emitter := buildEmitter(goBase)
-
-	logStep("emitter: driving OTLP traces/metrics/logs into collector")
-	if err := runEmitter(ctx, emitter, collector); err != nil {
-		return err
-	}
-
-	logStep("verify: polling clickhouse for rows in upstream tables")
-	if err := verifyRows(ctx, client, clickhouse); err != nil {
-		return err
-	}
-
-	logStep("api: building otelhouse-api and starting as service")
-	api := buildAPIService(goBase, clickhouseDSN, clickhouse)
-
-	logStep("e2e: running go test -tags e2e against the live API")
-	// Run the e2e Go test. The test is gated by the `e2e` build tag, so
-	// passing -tags e2e here picks it up. The fixed log TraceID is exposed
-	// to the test so it can query /api/logs?traceId=... deterministically.
+	logStep("e2e: running all-in-one harness container")
 	if _, err := goBase.
+		WithFile("/usr/local/bin/otelcol-contrib", collectorBin).
+		WithFile("/etc/otelcol/config.yaml", src.File("ci/otel-collector-config.yaml")).
 		WithServiceBinding("clickhouse", clickhouse).
-		WithServiceBinding("otelhouse-api", api).
-		WithEnvVariable("OTELHOUSE_API_URL", "http://otelhouse-api:8080").
+		// The collector YAML reads these via ${env:...}.
+		WithEnvVariable("CLICKHOUSE_HOST", "clickhouse").
+		WithEnvVariable("CLICKHOUSE_DB", clickhouseDB).
+		WithEnvVariable("CLICKHOUSE_USER", clickhouseUser).
+		WithEnvVariable("CLICKHOUSE_PASSWORD", clickhousePassword).
+		WithEnvVariable("CLICKHOUSE_DSN", clickhouseDSN).
 		WithEnvVariable("OTELHOUSE_E2E_LOG_TRACE_ID", e2eLogsTraceID).
-		WithExec([]string{
-			"go", "test", "-v", "-count=1", "-tags", "e2e", "-run", "TestE2E", "./...",
-		}).
+		WithEnvVariable("OTELHOUSE_E2E_LOG_SPAN_ID", e2eLogsSpanID).
+		WithEnvVariable("OTELHOUSE_API_URL", "http://127.0.0.1:8080").
+		WithExec([]string{"sh", "-c", e2eScript}).
 		Sync(ctx); err != nil {
-		return fmt.Errorf("e2e test: %w", err)
+		return fmt.Errorf("e2e harness: %w", err)
 	}
 	logStep("e2e: all assertions passed")
 	return nil
 }
 
-// logStep prints a timestamped progress marker to stderr so a hang in the
-// Dagger pipeline can be pinpointed to a specific step from CI logs.
+// logStep prints a timestamped progress marker to stderr so the pipeline's
+// position can be read straight off CI logs.
 func logStep(msg string) {
 	fmt.Fprintf(os.Stderr, "[e2e %s] %s\n", time.Now().UTC().Format(time.RFC3339), msg)
-}
-
-// buildCollectorService stands up the upstream otel-collector-contrib binary
-// as a Dagger service, wired to the ClickHouse service via service binding
-// and configured by ci/otel-collector-config.yaml.
-//
-// The binary is extracted from the upstream distroless image and run on top
-// of alpine. The distroless image (FROM scratch) is unusable as a Dagger
-// service in Dagger v0.21.7: the collector boots and serves on its ports,
-// but Dagger's service-readiness probe never reports the ports as ready and
-// every dependent WithServiceBinding hangs until the context expires.
-// Putting the same binary on a normal Linux base image makes the service
-// behave like any other Dagger service.
-func buildCollectorService(
-	client *dagger.Client,
-	clickhouse *dagger.Service,
-	src *dagger.Directory,
-) *dagger.Service {
-	collectorImage := fmt.Sprintf("otel/opentelemetry-collector-contrib:%s", otelCollectorVersion)
-	collectorBin := client.Container().From(collectorImage).File("/otelcol-contrib")
-
-	return client.Container().
-		From("alpine:3.20").
-		WithFile("/usr/local/bin/otelcol-contrib", collectorBin).
-		WithFile("/etc/otelcol/config.yaml", src.File("ci/otel-collector-config.yaml")).
-		WithServiceBinding("clickhouse", clickhouse).
-		// The YAML reads these via ${env:...} so credentials stay defined
-		// once in this file.
-		WithEnvVariable("CLICKHOUSE_HOST", "clickhouse").
-		WithEnvVariable("CLICKHOUSE_DB", clickhouseDB).
-		WithEnvVariable("CLICKHOUSE_USER", clickhouseUser).
-		WithEnvVariable("CLICKHOUSE_PASSWORD", clickhousePassword).
-		WithExposedPort(4317).
-		WithExposedPort(4318).
-		WithExec([]string{
-			"/usr/local/bin/otelcol-contrib",
-			"--config=/etc/otelcol/config.yaml",
-		}).
-		AsService()
 }
 
 // e2eLogsTraceID is the constant TraceID the local emitter stamps onto
@@ -238,118 +193,84 @@ const e2eLogsTraceID = "1234567890abcdef1234567890abcdef"
 // e2eLogsSpanID pairs with e2eLogsTraceID.
 const e2eLogsSpanID = "1234567890abcdef"
 
-// buildEmitter compiles the in-repo otelhouse-emit binary inside goBase.
+// e2eScript is the busybox-sh script that runs inside the single Dagger
+// e2e container. It builds the in-repo emitter and API, runs the upstream
+// collector and the API as background processes, emits traces/metrics/logs
+// over OTLP, and finally runs the Go e2e test that hits the API.
 //
-// We deliberately do not use the upstream telemetrygen here: `go install
+// We deliberately don't use telemetrygen: `go install
 // github.com/open-telemetry/opentelemetry-collector-contrib/cmd/telemetrygen`
-// pulls the entire opentelemetry-collector-contrib dependency tree (every
-// receiver, processor and exporter in contrib), which takes 10+ minutes on
-// a cold CI cache and timed out the workflow. The local emitter under
-// ci/cmd/otelhouse-emit uses only the OTel Go SDK and OTLP exporters and
-// shares the goBase Go module cache that the gofmt / vet / build / test
-// steps already populated.
-func buildEmitter(goBase *dagger.Container) *dagger.Container {
-	return goBase.WithExec([]string{
-		"go", "build",
-		"-o", "/usr/local/bin/otelhouse-emit",
-		"./cmd/otelhouse-emit",
-	})
-}
+// pulls the whole contrib tree and timed out the workflow on a cold cache.
+const e2eScript = `set -eu
 
-// runEmitter drives sample OTLP traces, metrics and logs into the Collector.
-// The emitter blocks until it has sent the requested count over OTLP and
-// flushed; the Collector's batch processor (1s timeout) then writes to
-// ClickHouse asynchronously, which is what verifyRows and the e2e test poll
-// for.
-//
-// Traces and metrics use the OTel SDK's default random ids. Logs are stamped
-// with a fixed TraceID/SpanID so the e2e test can assert
-// /api/logs?traceId=... returns deterministic content.
-func runEmitter(
-	ctx context.Context,
-	emitter *dagger.Container,
-	collector *dagger.Service,
-) error {
-	emissions := []struct {
-		signal string
-		extra  []string
-	}{
-		{"traces", nil},
-		{"metrics", nil},
-		{"logs", []string{
-			"-trace-id", e2eLogsTraceID,
-			"-span-id", e2eLogsSpanID,
-		}},
-	}
-	for _, e := range emissions {
-		args := []string{
-			"/usr/local/bin/otelhouse-emit",
-			"-signal", e.signal,
-			"-endpoint", "otelcol:4317",
-			"-count", "20",
-		}
-		args = append(args, e.extra...)
-		if _, err := emitter.
-			WithServiceBinding("otelcol", collector).
-			WithExec(args).
-			Sync(ctx); err != nil {
-			return fmt.Errorf("emit %s: %w", e.signal, err)
-		}
-	}
-	return nil
-}
+echo "[e2e-sh] building otelhouse-emit and otelhouse-api"
+go build -o /usr/local/bin/otelhouse-emit ./cmd/otelhouse-emit
+go build -o /usr/local/bin/otelhouse-api  ./cmd/otelhouse-api
 
-// verifyRows polls ClickHouse until each upstream-schema table expected for
-// the signals we emitted has at least one row, or fails after ~30s. The
-// emitter records gauge metrics, so we check otel_metrics_gauge specifically.
-func verifyRows(ctx context.Context, client *dagger.Client, clickhouse *dagger.Service) error {
-	script := fmt.Sprintf(`set -eu
-tables="otel_traces otel_logs otel_metrics_gauge"
-for t in $tables; do
-  count=0
-  for i in $(seq 1 30); do
-    count=$(clickhouse-client --host=clickhouse --user=%s --password=%s --database=%s --query="SELECT count() FROM $t" 2>/dev/null || echo 0)
-    if [ "$count" -gt 0 ]; then
-      echo "$t: $count rows"
-      break
-    fi
-    sleep 1
-  done
-  if [ "$count" -eq 0 ]; then
-    echo "no rows in $t after 30s" >&2
-    exit 1
+mkdir -p /tmp/e2e
+
+echo "[e2e-sh] starting otel-collector-contrib (background)"
+/usr/local/bin/otelcol-contrib --config=/etc/otelcol/config.yaml \
+  > /tmp/e2e/collector.log 2>&1 &
+COLLECTOR_PID=$!
+
+cleanup() {
+  status=$?
+  echo "[e2e-sh] cleaning up (exit=$status)"
+  kill "$COLLECTOR_PID" 2>/dev/null || true
+  if [ -n "${API_PID:-}" ]; then kill "$API_PID" 2>/dev/null || true; fi
+  if [ "$status" -ne 0 ]; then
+    echo "=== collector.log ==="
+    cat /tmp/e2e/collector.log 2>/dev/null || true
+    echo "=== api.log ==="
+    cat /tmp/e2e/api.log 2>/dev/null || true
   fi
-done`, clickhouseUser, clickhousePassword, clickhouseDB)
-
-	if _, err := client.Container().
-		From("clickhouse/clickhouse-server:25.5").
-		WithServiceBinding("clickhouse", clickhouse).
-		WithExec([]string{"sh", "-c", script}).
-		Sync(ctx); err != nil {
-		return fmt.Errorf("verify rows: %w", err)
-	}
-	return nil
 }
+trap cleanup EXIT
 
-// buildAPIService builds the otelhouse-api binary inside goBase and exposes
-// it on :8080 as a Dagger service pointed at the ClickHouse binding.
-func buildAPIService(
-	goBase *dagger.Container,
-	clickhouseDSN string,
-	clickhouse *dagger.Service,
-) *dagger.Service {
-	return goBase.
-		WithExec([]string{
-			"go", "build",
-			"-o", "/usr/local/bin/otelhouse-api",
-			"./cmd/otelhouse-api",
-		}).
-		WithServiceBinding("clickhouse", clickhouse).
-		WithExposedPort(8080).
-		WithExec([]string{
-			"/usr/local/bin/otelhouse-api",
-			"-addr", ":8080",
-			"-dsn", clickhouseDSN,
-		}).
-		AsService()
-}
+echo "[e2e-sh] waiting for collector to log 'Everything is ready'"
+for i in $(seq 1 60); do
+  if grep -q "Everything is ready" /tmp/e2e/collector.log 2>/dev/null; then
+    break
+  fi
+  sleep 1
+done
+if ! grep -q "Everything is ready" /tmp/e2e/collector.log 2>/dev/null; then
+  echo "[e2e-sh] collector did not become ready in 60s" >&2
+  exit 1
+fi
+echo "[e2e-sh] collector is ready"
+
+echo "[e2e-sh] emitting OTLP traces, metrics and logs"
+/usr/local/bin/otelhouse-emit -signal traces  -endpoint 127.0.0.1:4317 -count 20
+/usr/local/bin/otelhouse-emit -signal metrics -endpoint 127.0.0.1:4317 -count 20
+/usr/local/bin/otelhouse-emit -signal logs    -endpoint 127.0.0.1:4317 -count 20 \
+  -trace-id "$OTELHOUSE_E2E_LOG_TRACE_ID" -span-id "$OTELHOUSE_E2E_LOG_SPAN_ID"
+
+# Collector batch processor flushes every 1s; give it a brief grace period
+# before the API queries the upstream tables.
+echo "[e2e-sh] waiting for collector to flush rows to clickhouse"
+sleep 3
+
+echo "[e2e-sh] starting otelhouse-api (background)"
+/usr/local/bin/otelhouse-api -addr 127.0.0.1:8080 -dsn "$CLICKHOUSE_DSN" \
+  > /tmp/e2e/api.log 2>&1 &
+API_PID=$!
+
+echo "[e2e-sh] waiting for API to answer /api/runs"
+for i in $(seq 1 30); do
+  if wget -q -O /dev/null "$OTELHOUSE_API_URL/api/runs" 2>/dev/null; then
+    break
+  fi
+  sleep 1
+done
+if ! wget -q -O /dev/null "$OTELHOUSE_API_URL/api/runs" 2>/dev/null; then
+  echo "[e2e-sh] api did not become ready in 30s" >&2
+  exit 1
+fi
+echo "[e2e-sh] api is ready"
+
+echo "[e2e-sh] running go test -tags e2e"
+go test -v -count=1 -tags e2e -run TestE2E ./...
+echo "[e2e-sh] all assertions passed"
+`
