@@ -91,13 +91,17 @@ stays empty.
 
 ```json
 {
-  "iss": "otelhouse-mint",
+  "iss": "agentloop-operator",
   "aud": "otelhouse-gateway",
   "tenant": "agentloop-42",
   "iat": 1751500000,
-  "exp": 1751586400
+  "exp": 1754092000
 }
 ```
+
+The deployed gitops mint (`internal/otelhouse`) uses `iss: agentloop-operator`,
+`aud: otelhouse-gateway`, `alg: EdDSA`; the gateway config must match these
+exact strings or every token is rejected with 401.
 
 The signature is over the standard JWS Compact Serialization:
 `base64url(header) + '.' + base64url(payload) + '.' + base64url(sig)`.
@@ -111,7 +115,11 @@ The mint job needs, in addition to the private key:
 - `alg` — must be one of the three supported algorithms and match the
   gateway config.
 - Per-instance: the `tenant` string.
-- Reasonable `exp` (recommendation: 7 days, refresh from the mint job).
+- Reasonable `exp`. The deployed default is 30 days; rotation before expiry
+  is automated on the operator host (gitops#89), which re-mints and rolls
+  the tenant's collector well inside the TTL so telemetry never silently
+  stops. Shorter TTLs are fine as long as the rotation cadence stays ahead
+  of `exp`.
 
 Renewing tokens is a pure minting concern; the gateway does no
 long-lived caching, so a rolled key or a rotated token takes effect on
