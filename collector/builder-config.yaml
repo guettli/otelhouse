@@ -10,12 +10,13 @@
 #
 # The write path is:
 #
-#   otlp receiver → tenanttagger → memory_limiter → batch → clickhouseexporter
+#   otlp receiver → tenanttagger → tenantratelimit → memory_limiter → batch → clickhouseexporter
 #
-# Only tenantauth (extension) and tenanttagger (processor) are custom
-# code from this repo. Everything else — including the exporter that owns
-# the ClickHouse schema — is stock, so `SHOW CREATE TABLE otel.otel_traces`
-# is byte-identical to a fresh stock clickhouseexporter install.
+# Only tenantauth (extension), tenanttagger and tenantratelimit
+# (processors) are custom code from this repo. Everything else —
+# including the exporter that owns the ClickHouse schema — is stock, so
+# `SHOW CREATE TABLE otel.otel_traces` is byte-identical to a fresh
+# stock clickhouseexporter install.
 
 dist:
   module: github.com/guettli/otelhouse/collector/dist
@@ -40,6 +41,7 @@ processors:
   - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.114.0
   - gomod: go.opentelemetry.io/collector/processor/memorylimiterprocessor v0.114.0
   - gomod: github.com/guettli/otelhouse/collector/processor/tenanttagger v0.1.0
+  - gomod: github.com/guettli/otelhouse/collector/processor/tenantratelimit v0.1.0
 
 receivers:
   - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.114.0
@@ -57,3 +59,4 @@ exporters:
 replaces:
   - github.com/guettli/otelhouse/collector/extension/tenantauth => ../extension/tenantauth
   - github.com/guettli/otelhouse/collector/processor/tenanttagger => ../processor/tenanttagger
+  - github.com/guettli/otelhouse/collector/processor/tenantratelimit => ../processor/tenantratelimit
