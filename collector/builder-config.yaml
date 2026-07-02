@@ -1,0 +1,55 @@
+# OpenTelemetry Collector Builder configuration for the otelhouse
+# multi-tenant OTLP gateway.
+#
+# ocb (`go install go.opentelemetry.io/collector/cmd/builder@v0.114.0`) reads
+# this file and generates a Go main.go that imports every component below,
+# then runs `go build` to produce a single binary. The result is a
+# purpose-built distribution — no upstream distro (otelcol-contrib) is used
+# at runtime, but every non-custom component pulled in is a stock
+# upstream module at a pinned version.
+#
+# The write path is:
+#
+#   otlp receiver → tenanttagger → memory_limiter → batch → clickhouseexporter
+#
+# Only tenantauth (extension) and tenanttagger (processor) are custom
+# code from this repo. Everything else — including the exporter that owns
+# the ClickHouse schema — is stock, so `SHOW CREATE TABLE otel.otel_traces`
+# is byte-identical to a fresh stock clickhouseexporter install.
+
+dist:
+  module: github.com/guettli/otelhouse/collector/dist
+  name: otelhouse-gateway
+  description: Multi-tenant OTLP → ClickHouse gateway (per-tenant JWT auth)
+  output_path: ./_build
+  otelcol_version: 0.114.0
+
+# Pinned dependency versions.
+#
+# The clickhouseexporter version below is the schema source of truth: any
+# bump here MUST be paired with an update to the SHOW CREATE TABLE
+# fixture in the Dagger e2e (ci/e2e_tenant_test.go) so a silent schema
+# drift breaks CI instead of leaking into production.
+extensions:
+  - gomod: github.com/guettli/otelhouse/collector/extension/tenantauth v0.1.0
+
+processors:
+  - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.114.0
+  - gomod: go.opentelemetry.io/collector/processor/memorylimiterprocessor v0.114.0
+  - gomod: github.com/guettli/otelhouse/collector/processor/tenanttagger v0.1.0
+
+receivers:
+  - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.114.0
+
+exporters:
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/clickhouseexporter v0.114.0
+
+# Local replaces point ocb at this checkout's copies of the custom
+# components — until a v0.1.0 tag is published, the module proxy has no
+# way to resolve them. When ocb runs from this file's directory, the
+# relative `./extension/...` and `./processor/...` paths resolve to the
+# per-component go.mod files a few directories down. The published-tag
+# flow can drop these lines and pin the versions above.
+replaces:
+  - github.com/guettli/otelhouse/collector/extension/tenantauth => ./extension/tenantauth
+  - github.com/guettli/otelhouse/collector/processor/tenanttagger => ./processor/tenanttagger
