@@ -12,6 +12,19 @@ import (
 	"go.opentelemetry.io/collector/pdata/ptrace"
 )
 
+// noopMetrics builds an ingestMetrics whose counter goes into the OTel
+// noop provider — the fast-path used by tests that only care about the
+// processor's data-plane behaviour, not the observability signal. The
+// metrics-specific assertions live in metrics_test.go.
+func noopMetrics(t *testing.T) *ingestMetrics {
+	t.Helper()
+	m, err := newIngestMetrics(nil)
+	if err != nil {
+		t.Fatalf("newIngestMetrics: %v", err)
+	}
+	return m
+}
+
 // fakeAuth returns a client.AuthData that exposes exactly one attribute.
 // The empty-string case is used to prove the fail-closed path: an Auth
 // present but with an empty tenant is treated the same as no Auth at all.
@@ -65,7 +78,7 @@ func tenantAttr(t *testing.T, attrs pcommon.Map) string {
 func TestTraces_SpoofOverridden(t *testing.T) {
 	cfg := Config{AttributeKey: "tenant", AuthAttribute: "tenant"}
 	td := tracesWith(map[string]string{"tenant": "evil", "service.name": "foo"})
-	out, err := processTraces(ctxWithTenant("alice"), cfg, td)
+	out, err := processTraces(ctxWithTenant("alice"), cfg, noopMetrics(t), td)
 	if err != nil {
 		t.Fatalf("processTraces: %v", err)
 	}
@@ -97,7 +110,7 @@ func TestTraces_SpoofOverridden(t *testing.T) {
 func TestTraces_NoClientTenant(t *testing.T) {
 	cfg := Config{AttributeKey: "tenant", AuthAttribute: "tenant"}
 	td := tracesWith(map[string]string{"service.name": "foo"})
-	out, err := processTraces(ctxWithTenant("alice"), cfg, td)
+	out, err := processTraces(ctxWithTenant("alice"), cfg, noopMetrics(t), td)
 	if err != nil {
 		t.Fatalf("processTraces: %v", err)
 	}
@@ -112,7 +125,7 @@ func TestTraces_NoClientTenant(t *testing.T) {
 func TestTraces_FailClosed_NoAuth(t *testing.T) {
 	cfg := Config{AttributeKey: "tenant", AuthAttribute: "tenant"}
 	td := tracesWith(map[string]string{"tenant": "evil"})
-	_, err := processTraces(context.Background(), cfg, td)
+	_, err := processTraces(context.Background(), cfg, noopMetrics(t), td)
 	if !errors.Is(err, ErrMissingTenant) {
 		t.Fatalf("err = %v, want ErrMissingTenant", err)
 	}
@@ -123,7 +136,7 @@ func TestTraces_FailClosed_NoAuth(t *testing.T) {
 func TestTraces_FailClosed_EmptyAuthTenant(t *testing.T) {
 	cfg := Config{AttributeKey: "tenant", AuthAttribute: "tenant"}
 	td := tracesWith(map[string]string{})
-	_, err := processTraces(ctxWithTenant(""), cfg, td)
+	_, err := processTraces(ctxWithTenant(""), cfg, noopMetrics(t), td)
 	if !errors.Is(err, ErrMissingTenant) {
 		t.Fatalf("err = %v, want ErrMissingTenant", err)
 	}
@@ -142,7 +155,7 @@ func TestTraces_PreservesOtherAttrs(t *testing.T) {
 		"deployment.env":  "prod",
 	}
 	td := tracesWith(seed)
-	out, err := processTraces(ctxWithTenant("alice"), cfg, td)
+	out, err := processTraces(ctxWithTenant("alice"), cfg, noopMetrics(t), td)
 	if err != nil {
 		t.Fatalf("processTraces: %v", err)
 	}
@@ -166,7 +179,7 @@ func TestTraces_MultipleResourceSpans(t *testing.T) {
 		rs.Resource().Attributes().PutStr("tenant", "evil")
 		rs.ScopeSpans().AppendEmpty().Spans().AppendEmpty().SetName("op")
 	}
-	out, err := processTraces(ctxWithTenant("alice"), cfg, td)
+	out, err := processTraces(ctxWithTenant("alice"), cfg, noopMetrics(t), td)
 	if err != nil {
 		t.Fatalf("processTraces: %v", err)
 	}
@@ -184,7 +197,7 @@ func TestLogs_Stamped(t *testing.T) {
 	rl := ld.ResourceLogs().AppendEmpty()
 	rl.Resource().Attributes().PutStr("tenant", "evil")
 	rl.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty().Body().SetStr("hi")
-	out, err := processLogs(ctxWithTenant("alice"), cfg, ld)
+	out, err := processLogs(ctxWithTenant("alice"), cfg, noopMetrics(t), ld)
 	if err != nil {
 		t.Fatalf("processLogs: %v", err)
 	}
@@ -198,7 +211,7 @@ func TestLogs_FailClosed(t *testing.T) {
 	cfg := Config{AttributeKey: "tenant", AuthAttribute: "tenant"}
 	ld := plog.NewLogs()
 	ld.ResourceLogs().AppendEmpty()
-	if _, err := processLogs(context.Background(), cfg, ld); !errors.Is(err, ErrMissingTenant) {
+	if _, err := processLogs(context.Background(), cfg, noopMetrics(t), ld); !errors.Is(err, ErrMissingTenant) {
 		t.Fatalf("err = %v, want ErrMissingTenant", err)
 	}
 }
@@ -210,7 +223,7 @@ func TestMetrics_Stamped(t *testing.T) {
 	rm := md.ResourceMetrics().AppendEmpty()
 	rm.Resource().Attributes().PutStr("tenant", "evil")
 	rm.ScopeMetrics().AppendEmpty().Metrics().AppendEmpty().SetName("m")
-	out, err := processMetrics(ctxWithTenant("alice"), cfg, md)
+	out, err := processMetrics(ctxWithTenant("alice"), cfg, noopMetrics(t), md)
 	if err != nil {
 		t.Fatalf("processMetrics: %v", err)
 	}
@@ -224,7 +237,7 @@ func TestMetrics_FailClosed(t *testing.T) {
 	cfg := Config{AttributeKey: "tenant", AuthAttribute: "tenant"}
 	md := pmetric.NewMetrics()
 	md.ResourceMetrics().AppendEmpty()
-	if _, err := processMetrics(context.Background(), cfg, md); !errors.Is(err, ErrMissingTenant) {
+	if _, err := processMetrics(context.Background(), cfg, noopMetrics(t), md); !errors.Is(err, ErrMissingTenant) {
 		t.Fatalf("err = %v, want ErrMissingTenant", err)
 	}
 }
@@ -237,7 +250,7 @@ func TestCustomKeys(t *testing.T) {
 	info := client.Info{Auth: fakeAuth{name: "org", value: "acme"}}
 	ctx := client.NewContext(context.Background(), info)
 	td := tracesWith(map[string]string{"x-tenant-id": "evil"})
-	out, err := processTraces(ctx, cfg, td)
+	out, err := processTraces(ctx, cfg, noopMetrics(t), td)
 	if err != nil {
 		t.Fatalf("processTraces: %v", err)
 	}

@@ -116,7 +116,7 @@ func newAuth(t *testing.T, km keyMaterial) *tenantAuth {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("cfg.Validate: %v", err)
 	}
-	a, err := newTenantAuth(cfg)
+	a, err := newTenantAuth(cfg, nil)
 	if err != nil {
 		t.Fatalf("newTenantAuth: %v", err)
 	}
