@@ -86,6 +86,24 @@ func pipeline(ctx context.Context) error {
 		return fmt.Errorf("go vet: %w", err)
 	}
 
+	// The gateway's custom OTel Collector components live in their own
+	// Go modules under /src/collector so ocb can pull each one in via a
+	// gomod: entry in builder-config.yaml (#53). Vet/lint/build/test them
+	// alongside the ci module — a component that fails to build here
+	// would also fail the ocb build downstream.
+	collectorMods := []string{
+		"/src/collector/extension/tenantauth",
+		"/src/collector/processor/tenanttagger",
+	}
+	for _, dir := range collectorMods {
+		if _, err = goBase.
+			WithWorkdir(dir).
+			WithExec([]string{"go", "vet", "./..."}).
+			Sync(ctx); err != nil {
+			return fmt.Errorf("go vet %s: %w", dir, err)
+		}
+	}
+
 	// golangci-lint
 	lintCtr := client.Container().
 		From("golangci/golangci-lint:v2.12.2-alpine").
@@ -94,10 +112,26 @@ func pipeline(ctx context.Context) error {
 	if _, err = lintCtr.WithExec([]string{"golangci-lint", "run", "./..."}).Sync(ctx); err != nil {
 		return fmt.Errorf("golangci-lint: %w", err)
 	}
+	for _, dir := range collectorMods {
+		if _, err = lintCtr.
+			WithWorkdir(dir).
+			WithExec([]string{"golangci-lint", "run", "./..."}).
+			Sync(ctx); err != nil {
+			return fmt.Errorf("golangci-lint %s: %w", dir, err)
+		}
+	}
 
 	// go build
 	if _, err = goBase.WithExec([]string{"go", "build", "./..."}).Sync(ctx); err != nil {
 		return fmt.Errorf("go build: %w", err)
+	}
+	for _, dir := range collectorMods {
+		if _, err = goBase.
+			WithWorkdir(dir).
+			WithExec([]string{"go", "build", "./..."}).
+			Sync(ctx); err != nil {
+			return fmt.Errorf("go build %s: %w", dir, err)
+		}
 	}
 
 	// Unit-style tests against the live ClickHouse service. The e2e test
@@ -110,6 +144,18 @@ func pipeline(ctx context.Context) error {
 		WithExec([]string{"go", "test", "-v", "-count=1", "./..."}).
 		Sync(ctx); err != nil {
 		return fmt.Errorf("go test: %w", err)
+	}
+
+	// Unit tests for the collector components. These are the acceptance
+	// tests the issue calls out — the "cannot forge tenant" and
+	// "fail-closed" guarantees are enforced here.
+	for _, dir := range collectorMods {
+		if _, err = goBase.
+			WithWorkdir(dir).
+			WithExec([]string{"go", "test", "-v", "-count=1", "./..."}).
+			Sync(ctx); err != nil {
+			return fmt.Errorf("go test %s: %w", dir, err)
+		}
 	}
 
 	// End-to-end test: Dagger → OTLP → Collector → ClickHouse → API.

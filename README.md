@@ -41,6 +41,27 @@ See [#53](https://github.com/guettli/otelhouse/issues/53) and the gitops
 epic [guettli/gitops#73](https://github.com/guettli/gitops/issues/73) for
 the broader multi-tenancy design.
 
+## Multi-tenant gateway
+
+The custom Collector distribution lives in [`collector/`](collector/):
+
+- [`extension/tenantauth`](collector/extension/tenantauth) verifies a
+  per-tenant EdDSA/ES256/RS256 JWT on every OTLP request and resolves the
+  bound tenant into the auth context. Algorithm pinning, `iss`/`aud`/`exp`
+  checks, `alg:none` and HS↔RS confusion are covered by
+  [`extension_test.go`](collector/extension/tenantauth/extension_test.go).
+- [`processor/tenanttagger`](collector/processor/tenanttagger) reads the
+  authenticated tenant from `client.Info` and stamps it as
+  `resource.attributes["tenant"]`, deleting any client-supplied value.
+  It is **fail-closed**: a batch arriving without a resolved tenant is
+  dropped, not written unlabelled ([`processor_test.go`](collector/processor/tenanttagger/processor_test.go)).
+- [`builder-config.yaml`](collector/builder-config.yaml) is the ocb config
+  that pins upstream receiver/processor/exporter versions and pulls in
+  the two custom components — nothing else changes on the write path, so
+  the stock `clickhouseexporter` schema is preserved unchanged.
+- [`docs/jwt-contract.md`](docs/jwt-contract.md) is the wire contract the
+  gitops mint job must produce (claims, algorithms, iss/aud).
+
 ## Architecture
 
 ```mermaid
