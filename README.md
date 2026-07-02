@@ -9,6 +9,38 @@ to `go get` from this repository.
 The high-level design comes from epic
 [#32](https://github.com/guettli/otelhouse/issues/32).
 
+## Why otelhouse exists
+
+The parts that make up an OTLP → ClickHouse pipeline each already work on
+their own, but nothing bridged them under the exact constraints we need:
+one shared ClickHouse, the **stock `clickhouseexporter` schema** (so every
+tenant gets Grafana's default OTel dashboards for free), hundreds–thousands
+of tenants, with **per-tenant credential-bound write isolation** and
+**per-tenant read isolation**.
+
+- The stock **OpenTelemetry Collector + `clickhouseexporter`** writes
+  OTLP → ClickHouse with the canonical `otel_*` schema — but it is
+  **single-tenant**: one shared token, no per-tenant identity, no
+  per-tenant write enforcement, no read isolation.
+- Full products on ClickHouse — **Uptrace**, **SigNoz**, **ClickStack /
+  HyperDX** — either ship their **own non-stock schema** (Uptrace bundles
+  its own schema plus PostgreSQL and its own UI) or are **single-tenant in
+  OSS** (SigNoz, ClickStack). Multi-tenanting them means running one whole
+  stack per tenant.
+- **No tool provided the exact bridge**: stock schema, one ClickHouse, many
+  tenants, credential-bound at both write and read time.
+
+otelhouse is the **thin bridge** that adds only the missing piece — a JWT
+`tenantauth` extension plus a `tenanttagger` processor that stamps the
+tenant onto every record from the verified token — while keeping every
+other part **stock**: stock OTLP receiver, stock `clickhouseexporter` and
+schema, ClickHouse row policies for reads. It deliberately does **not**
+reinvent the exporter or the schema.
+
+See [#53](https://github.com/guettli/otelhouse/issues/53) and the gitops
+epic [guettli/gitops#73](https://github.com/guettli/gitops/issues/73) for
+the broader multi-tenancy design.
+
 ## Architecture
 
 ```mermaid
