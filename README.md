@@ -1,13 +1,23 @@
 # otelhouse
 
-otelhouse is a Dagger-orchestrated end-to-end harness for the
-`Dagger → OpenTelemetry → upstream Collector → ClickHouse → Svelte UI`
-observability stack. It exists to prove that the pipeline works as an
-integration unit, not to publish any reusable library — there is nothing
-to `go get` from this repository.
+otelhouse is two things built around the
+`OpenTelemetry → upstream Collector → ClickHouse` pipeline:
 
-The high-level design comes from epic
-[#32](https://github.com/guettli/otelhouse/issues/32).
+1. **A deployed artifact — the multi-tenant OTLP gateway.** A custom
+   OpenTelemetry Collector distribution (JWT `tenantauth` + `tenanttagger`
+   around the **stock** `clickhouseexporter`) published as a container image,
+   `ghcr.io/guettli/otelhouse-gateway`, and deployed by
+   [gitops#73](https://github.com/guettli/gitops/issues/73) to serve many
+   agentloop tenants from **one shared ClickHouse** with per-tenant write and
+   read isolation. This is the reusable output of the repo.
+2. **A Dagger-orchestrated end-to-end harness** for the
+   `Dagger → OTLP → Collector → ClickHouse → Query API → Svelte UI` stack,
+   proving the pipeline works as an integration unit.
+
+There is nothing to `go get` here — the shipped artifact is the gateway
+**image**, and the query API/UI are harness binaries. The high-level design
+comes from epics [#32](https://github.com/guettli/otelhouse/issues/32) and
+[#53](https://github.com/guettli/otelhouse/issues/53).
 
 ## Why otelhouse exists
 
@@ -61,6 +71,30 @@ The custom Collector distribution lives in [`collector/`](collector/):
   the stock `clickhouseexporter` schema is preserved unchanged.
 - [`docs/jwt-contract.md`](docs/jwt-contract.md) is the wire contract the
   gitops mint job must produce (claims, algorithms, iss/aud).
+
+### Deploying & consuming the gateway
+
+The gateway is built and published as `ghcr.io/guettli/otelhouse-gateway` by
+CI on every push to `main` (see `ci/`). It is **deployed and operated from
+[gitops](https://github.com/guettli/gitops)**, not from here — this repo owns
+the code and the image; gitops owns the running stack, the shared ClickHouse,
+the keypair and the per-tenant secrets. The production wiring lives under
+`k8s/plain/otelhouse/` in gitops and is described in epic gitops#73.
+
+A tenant connects to the running gateway like any OTLP endpoint, plus a token:
+
+1. The operator mints a per-tenant JWT with the private key held in gitops
+   (`task k8s-mint-tenant-jwt -- <tenant>`) — see
+   [`docs/jwt-contract.md`](docs/jwt-contract.md) for the claims.
+2. The tenant's Collector/SDK sends OTLP to the gateway with
+   `Authorization: Bearer <jwt>`. The gateway verifies the token, stamps
+   `ResourceAttributes['tenant']`, and writes via the stock exporter.
+3. Reads are isolated by ClickHouse row policies bound to a per-tenant
+   `<tenant>_ro` user, so a tenant sees only its own rows and can point
+   Grafana's default OTel dashboards straight at the shared database.
+
+Tokens are short-lived; rotation before expiry is automated operator-side
+(gitops#89) so the signing key never enters the cluster.
 
 ## Architecture
 
