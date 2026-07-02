@@ -49,10 +49,11 @@ exporters:
 
 # Local replaces point ocb at this checkout's copies of the custom
 # components — until a v0.1.0 tag is published, the module proxy has no
-# way to resolve them. When ocb runs from this file's directory, the
-# relative `./extension/...` and `./processor/...` paths resolve to the
-# per-component go.mod files a few directories down. The published-tag
-# flow can drop these lines and pin the versions above.
+# way to resolve them. The paths below are written verbatim into the
+# generated go.mod at dist.output_path (./_build), so they are relative
+# to that generated go.mod — `../extension/tenantauth` from
+# collector/_build/go.mod resolves to collector/extension/tenantauth.
+# The published-tag flow can drop these lines and pin the versions above.
 replaces:
-  - github.com/guettli/otelhouse/collector/extension/tenantauth => ./extension/tenantauth
-  - github.com/guettli/otelhouse/collector/processor/tenanttagger => ./processor/tenanttagger
+  - github.com/guettli/otelhouse/collector/extension/tenantauth => ../extension/tenantauth
+  - github.com/guettli/otelhouse/collector/processor/tenanttagger => ../processor/tenanttagger
