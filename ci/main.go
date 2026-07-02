@@ -94,6 +94,7 @@ func pipeline(ctx context.Context) error {
 	collectorMods := []string{
 		"/src/collector/extension/tenantauth",
 		"/src/collector/processor/tenanttagger",
+		"/src/collector/processor/tenantratelimit",
 	}
 	for _, dir := range collectorMods {
 		if _, err = goBase.

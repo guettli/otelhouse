@@ -65,6 +65,13 @@ The custom Collector distribution lives in [`collector/`](collector/):
   `resource.attributes["tenant"]`, deleting any client-supplied value.
   It is **fail-closed**: a batch arriving without a resolved tenant is
   dropped, not written unlabelled ([`processor_test.go`](collector/processor/tenanttagger/processor_test.go)).
+- [`processor/tenantratelimit`](collector/processor/tenantratelimit)
+  enforces a per-tenant ingest rate keyed off the same signed claim.
+  Over-limit batches are rejected with gRPC `RESOURCE_EXHAUSTED` /
+  HTTP `429` and counted on
+  `otelhouse_gateway_ratelimit_dropped_total{tenant}` — no silent drop.
+  Limits are configurable per tenant with a global default; buckets are
+  in-memory per-replica.
 - [`builder-config.yaml`](collector/builder-config.yaml) is the ocb config
   that pins upstream receiver/processor/exporter versions and pulls in
   the two custom components — nothing else changes on the write path, so
