@@ -39,10 +39,14 @@ func createTracesProcessor(
 	nextConsumer consumer.Traces,
 ) (processor.Traces, error) {
 	pCfg := cfg.(*Config)
+	m, err := newIngestMetrics(set.MeterProvider)
+	if err != nil {
+		return nil, err
+	}
 	return processorhelper.NewTraces(
 		ctx, set, cfg, nextConsumer,
 		func(ctx context.Context, td ptrace.Traces) (ptrace.Traces, error) {
-			return processTraces(ctx, *pCfg, td)
+			return processTraces(ctx, *pCfg, m, td)
 		},
 		processorhelper.WithCapabilities(consumer.Capabilities{MutatesData: true}),
 	)
@@ -55,10 +59,14 @@ func createLogsProcessor(
 	nextConsumer consumer.Logs,
 ) (processor.Logs, error) {
 	pCfg := cfg.(*Config)
+	m, err := newIngestMetrics(set.MeterProvider)
+	if err != nil {
+		return nil, err
+	}
 	return processorhelper.NewLogs(
 		ctx, set, cfg, nextConsumer,
 		func(ctx context.Context, ld plog.Logs) (plog.Logs, error) {
-			return processLogs(ctx, *pCfg, ld)
+			return processLogs(ctx, *pCfg, m, ld)
 		},
 		processorhelper.WithCapabilities(consumer.Capabilities{MutatesData: true}),
 	)
@@ -71,10 +79,14 @@ func createMetricsProcessor(
 	nextConsumer consumer.Metrics,
 ) (processor.Metrics, error) {
 	pCfg := cfg.(*Config)
+	m, err := newIngestMetrics(set.MeterProvider)
+	if err != nil {
+		return nil, err
+	}
 	return processorhelper.NewMetrics(
 		ctx, set, cfg, nextConsumer,
 		func(ctx context.Context, md pmetric.Metrics) (pmetric.Metrics, error) {
-			return processMetrics(ctx, *pCfg, md)
+			return processMetrics(ctx, *pCfg, m, md)
 		},
 		processorhelper.WithCapabilities(consumer.Capabilities{MutatesData: true}),
 	)

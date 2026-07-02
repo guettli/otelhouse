@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/collector/client"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/extension/auth"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // tenantAuth is the auth.Server implementation. It verifies a Bearer JWT
@@ -18,15 +19,19 @@ import (
 // resolved tenant into the request's client.Info so the tenanttagger
 // processor can stamp it on every record.
 type tenantAuth struct {
-	cfg    *Config
-	key    any
-	parser *jwt.Parser
-	claim  string
+	cfg     *Config
+	key     any
+	parser  *jwt.Parser
+	claim   string
+	metrics *authMetrics
 }
 
 // newTenantAuth is exposed to the factory. It parses the PEM key once at
-// construction time so runtime auth calls are pure verifies.
-func newTenantAuth(cfg *Config) (*tenantAuth, error) {
+// construction time so runtime auth calls are pure verifies. The
+// MeterProvider is supplied by the collector via extension.Settings; a nil
+// provider is treated as no-op so bare unit tests do not need to wire an
+// SDK through.
+func newTenantAuth(cfg *Config, mp metric.MeterProvider) (*tenantAuth, error) {
 	pem, err := cfg.loadPEM()
 	if err != nil {
 		return nil, err
@@ -44,11 +49,16 @@ func newTenantAuth(cfg *Config) (*tenantAuth, error) {
 		jwt.WithAudience(cfg.Audience),
 		jwt.WithExpirationRequired(),
 	)
+	m, err := newAuthMetrics(mp)
+	if err != nil {
+		return nil, err
+	}
 	return &tenantAuth{
-		cfg:    cfg,
-		key:    key,
-		parser: parser,
-		claim:  cfg.tenantClaim(),
+		cfg:     cfg,
+		key:     key,
+		parser:  parser,
+		claim:   cfg.tenantClaim(),
+		metrics: m,
 	}, nil
 }
 
@@ -72,6 +82,7 @@ func (t *tenantAuth) Shutdown(_ context.Context) error { return nil }
 func (t *tenantAuth) Authenticate(ctx context.Context, sources map[string][]string) (context.Context, error) {
 	token, err := extractBearer(sources)
 	if err != nil {
+		t.metrics.recordRejection(ctx, reasonMalformed)
 		return ctx, err
 	}
 	claims := jwt.MapClaims{}
@@ -85,13 +96,16 @@ func (t *tenantAuth) Authenticate(ctx context.Context, sources map[string][]stri
 		return t.key, nil
 	})
 	if err != nil {
+		t.metrics.recordRejection(ctx, classifyJWTError(err))
 		return ctx, fmt.Errorf("tenantauth: verify token: %w", err)
 	}
 	if !parsed.Valid {
+		t.metrics.recordRejection(ctx, reasonMalformed)
 		return ctx, errors.New("tenantauth: token invalid")
 	}
 	tenant, err := extractTenant(claims, t.claim)
 	if err != nil {
+		t.metrics.recordRejection(ctx, reasonMissingTenant)
 		return ctx, err
 	}
 	info := client.FromContext(ctx)

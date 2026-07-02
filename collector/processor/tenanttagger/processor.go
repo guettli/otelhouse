@@ -39,7 +39,7 @@ func stampAttrs(attrs pcommon.Map, attrKey, tenant string) {
 // processTraces mutates the batch in place. Returning td unmodified on
 // the error path is fine — the collector's consumer chain drops the
 // batch when the error is non-nil.
-func processTraces(ctx context.Context, cfg Config, td ptrace.Traces) (ptrace.Traces, error) {
+func processTraces(ctx context.Context, cfg Config, m *ingestMetrics, td ptrace.Traces) (ptrace.Traces, error) {
 	tenant, ok := tenantFromContext(ctx, cfg.AuthAttribute)
 	if !ok {
 		return td, ErrMissingTenant
@@ -48,10 +48,11 @@ func processTraces(ctx context.Context, cfg Config, td ptrace.Traces) (ptrace.Tr
 	for i := 0; i < rss.Len(); i++ {
 		stampAttrs(rss.At(i).Resource().Attributes(), cfg.AttributeKey, tenant)
 	}
+	m.recordIngest(ctx, tenant, signalTraces, int64(td.SpanCount()))
 	return td, nil
 }
 
-func processLogs(ctx context.Context, cfg Config, ld plog.Logs) (plog.Logs, error) {
+func processLogs(ctx context.Context, cfg Config, m *ingestMetrics, ld plog.Logs) (plog.Logs, error) {
 	tenant, ok := tenantFromContext(ctx, cfg.AuthAttribute)
 	if !ok {
 		return ld, ErrMissingTenant
@@ -60,10 +61,11 @@ func processLogs(ctx context.Context, cfg Config, ld plog.Logs) (plog.Logs, erro
 	for i := 0; i < rls.Len(); i++ {
 		stampAttrs(rls.At(i).Resource().Attributes(), cfg.AttributeKey, tenant)
 	}
+	m.recordIngest(ctx, tenant, signalLogs, int64(ld.LogRecordCount()))
 	return ld, nil
 }
 
-func processMetrics(ctx context.Context, cfg Config, md pmetric.Metrics) (pmetric.Metrics, error) {
+func processMetrics(ctx context.Context, cfg Config, m *ingestMetrics, md pmetric.Metrics) (pmetric.Metrics, error) {
 	tenant, ok := tenantFromContext(ctx, cfg.AuthAttribute)
 	if !ok {
 		return md, ErrMissingTenant
@@ -72,5 +74,6 @@ func processMetrics(ctx context.Context, cfg Config, md pmetric.Metrics) (pmetri
 	for i := 0; i < rms.Len(); i++ {
 		stampAttrs(rms.At(i).Resource().Attributes(), cfg.AttributeKey, tenant)
 	}
+	m.recordIngest(ctx, tenant, signalMetrics, int64(md.DataPointCount()))
 	return md, nil
 }

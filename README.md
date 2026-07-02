@@ -71,6 +71,10 @@ The custom Collector distribution lives in [`collector/`](collector/):
   the stock `clickhouseexporter` schema is preserved unchanged.
 - [`docs/jwt-contract.md`](docs/jwt-contract.md) is the wire contract the
   gitops mint job must produce (claims, algorithms, iss/aud).
+- [`docs/metrics.md`](docs/metrics.md) documents the per-tenant ingest and
+  auth-rejection Prometheus metrics the gateway emits — the operator's
+  view into "who is sending how much" and "which tenant just went silent
+  because a token expired."
 
 ### Deploying & consuming the gateway
 
