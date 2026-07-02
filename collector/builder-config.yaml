@@ -22,7 +22,10 @@ dist:
   name: otelhouse-gateway
   description: Multi-tenant OTLP → ClickHouse gateway (per-tenant JWT auth)
   output_path: ./_build
-  otelcol_version: 0.114.0
+  # No otelcol_version: cmd/builder v0.114.0 removed that manifest field and
+  # derives the core Collector version from its own version (pinned to
+  # otelCollectorVersion in ci/gateway.go) + the component modules below, all
+  # pinned to v0.114.0. Setting it errors with "otelcol_version has been removed".
 
 # Pinned dependency versions.
 #
@@ -46,10 +49,11 @@ exporters:
 
 # Local replaces point ocb at this checkout's copies of the custom
 # components — until a v0.1.0 tag is published, the module proxy has no
-# way to resolve them. When ocb runs from this file's directory, the
-# relative `./extension/...` and `./processor/...` paths resolve to the
-# per-component go.mod files a few directories down. The published-tag
-# flow can drop these lines and pin the versions above.
+# way to resolve them. The paths below are written verbatim into the
+# generated go.mod at dist.output_path (./_build), so they are relative
+# to that generated go.mod — `../extension/tenantauth` from
+# collector/_build/go.mod resolves to collector/extension/tenantauth.
+# The published-tag flow can drop these lines and pin the versions above.
 replaces:
-  - github.com/guettli/otelhouse/collector/extension/tenantauth => ./extension/tenantauth
-  - github.com/guettli/otelhouse/collector/processor/tenanttagger => ./processor/tenanttagger
+  - github.com/guettli/otelhouse/collector/extension/tenantauth => ../extension/tenantauth
+  - github.com/guettli/otelhouse/collector/processor/tenanttagger => ../processor/tenanttagger

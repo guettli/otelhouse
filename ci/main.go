@@ -163,6 +163,17 @@ func pipeline(ctx context.Context) error {
 		return fmt.Errorf("e2e: %w", err)
 	}
 
+	// Build the deployable gateway image (ocb → distroless). Always runs
+	// so PRs validate the image builds; the publish step below is a no-op
+	// unless this run is a push to main or a tag push.
+	gatewayImage := buildGatewayImage(client, src, goMod, goBuild)
+	if _, err = gatewayImage.Sync(ctx); err != nil {
+		return fmt.Errorf("gateway image build: %w", err)
+	}
+	if err = publishGatewayImage(ctx, client, gatewayImage); err != nil {
+		return fmt.Errorf("gateway image publish: %w", err)
+	}
+
 	fmt.Println("All checks passed.")
 	return nil
 }
