@@ -1,13 +1,111 @@
 # otelhouse
 
-otelhouse is a Dagger-orchestrated end-to-end harness for the
-`Dagger → OpenTelemetry → upstream Collector → ClickHouse → Svelte UI`
-observability stack. It exists to prove that the pipeline works as an
-integration unit, not to publish any reusable library — there is nothing
-to `go get` from this repository.
+otelhouse is two things built around the
+`OpenTelemetry → upstream Collector → ClickHouse` pipeline:
 
-The high-level design comes from epic
-[#32](https://github.com/guettli/otelhouse/issues/32).
+1. **A deployed artifact — the multi-tenant OTLP gateway.** A custom
+   OpenTelemetry Collector distribution (JWT `tenantauth` + `tenanttagger`
+   around the **stock** `clickhouseexporter`) published as a container image,
+   `ghcr.io/guettli/otelhouse-gateway`, and deployed by
+   [gitops#73](https://github.com/guettli/gitops/issues/73) to serve many
+   agentloop tenants from **one shared ClickHouse** with per-tenant write and
+   read isolation. This is the reusable output of the repo.
+2. **A Dagger-orchestrated end-to-end harness** for the
+   `Dagger → OTLP → Collector → ClickHouse → Query API → Svelte UI` stack,
+   proving the pipeline works as an integration unit.
+
+There is nothing to `go get` here — the shipped artifact is the gateway
+**image**, and the query API/UI are harness binaries. The high-level design
+comes from epics [#32](https://github.com/guettli/otelhouse/issues/32) and
+[#53](https://github.com/guettli/otelhouse/issues/53).
+
+## Why otelhouse exists
+
+The parts that make up an OTLP → ClickHouse pipeline each already work on
+their own, but nothing bridged them under the exact constraints we need:
+one shared ClickHouse, the **stock `clickhouseexporter` schema** (so every
+tenant gets Grafana's default OTel dashboards for free), hundreds–thousands
+of tenants, with **per-tenant credential-bound write isolation** and
+**per-tenant read isolation**.
+
+- The stock **OpenTelemetry Collector + `clickhouseexporter`** writes
+  OTLP → ClickHouse with the canonical `otel_*` schema — but it is
+  **single-tenant**: one shared token, no per-tenant identity, no
+  per-tenant write enforcement, no read isolation.
+- Full products on ClickHouse — **Uptrace**, **SigNoz**, **ClickStack /
+  HyperDX** — either ship their **own non-stock schema** (Uptrace bundles
+  its own schema plus PostgreSQL and its own UI) or are **single-tenant in
+  OSS** (SigNoz, ClickStack). Multi-tenanting them means running one whole
+  stack per tenant.
+- **No tool provided the exact bridge**: stock schema, one ClickHouse, many
+  tenants, credential-bound at both write and read time.
+
+otelhouse is the **thin bridge** that adds only the missing piece — a JWT
+`tenantauth` extension plus a `tenanttagger` processor that stamps the
+tenant onto every record from the verified token — while keeping every
+other part **stock**: stock OTLP receiver, stock `clickhouseexporter` and
+schema, ClickHouse row policies for reads. It deliberately does **not**
+reinvent the exporter or the schema.
+
+See [#53](https://github.com/guettli/otelhouse/issues/53) and the gitops
+epic [guettli/gitops#73](https://github.com/guettli/gitops/issues/73) for
+the broader multi-tenancy design.
+
+## Multi-tenant gateway
+
+The custom Collector distribution lives in [`collector/`](collector/):
+
+- [`extension/tenantauth`](collector/extension/tenantauth) verifies a
+  per-tenant EdDSA/ES256/RS256 JWT on every OTLP request and resolves the
+  bound tenant into the auth context. Algorithm pinning, `iss`/`aud`/`exp`
+  checks, `alg:none` and HS↔RS confusion are covered by
+  [`extension_test.go`](collector/extension/tenantauth/extension_test.go).
+- [`processor/tenanttagger`](collector/processor/tenanttagger) reads the
+  authenticated tenant from `client.Info` and stamps it as
+  `resource.attributes["tenant"]`, deleting any client-supplied value.
+  It is **fail-closed**: a batch arriving without a resolved tenant is
+  dropped, not written unlabelled ([`processor_test.go`](collector/processor/tenanttagger/processor_test.go)).
+- [`processor/tenantratelimit`](collector/processor/tenantratelimit)
+  enforces a per-tenant ingest rate keyed off the same signed claim.
+  Over-limit batches are rejected with gRPC `RESOURCE_EXHAUSTED` /
+  HTTP `429` and counted on
+  `otelhouse_gateway_ratelimit_dropped_total{tenant}` — no silent drop.
+  Limits are configurable per tenant with a global default; buckets are
+  in-memory per-replica.
+- [`builder-config.yaml`](collector/builder-config.yaml) is the ocb config
+  that pins upstream receiver/processor/exporter versions and pulls in
+  the two custom components — nothing else changes on the write path, so
+  the stock `clickhouseexporter` schema is preserved unchanged.
+- [`docs/jwt-contract.md`](docs/jwt-contract.md) is the wire contract the
+  gitops mint job must produce (claims, algorithms, iss/aud).
+- [`docs/metrics.md`](docs/metrics.md) documents the per-tenant ingest and
+  auth-rejection Prometheus metrics the gateway emits — the operator's
+  view into "who is sending how much" and "which tenant just went silent
+  because a token expired."
+
+### Deploying & consuming the gateway
+
+The gateway is built and published as `ghcr.io/guettli/otelhouse-gateway` by
+CI on every push to `main` (see `ci/`). It is **deployed and operated from
+[gitops](https://github.com/guettli/gitops)**, not from here — this repo owns
+the code and the image; gitops owns the running stack, the shared ClickHouse,
+the keypair and the per-tenant secrets. The production wiring lives under
+`k8s/plain/otelhouse/` in gitops and is described in epic gitops#73.
+
+A tenant connects to the running gateway like any OTLP endpoint, plus a token:
+
+1. The operator mints a per-tenant JWT with the private key held in gitops
+   (`task k8s-mint-tenant-jwt -- <tenant>`) — see
+   [`docs/jwt-contract.md`](docs/jwt-contract.md) for the claims.
+2. The tenant's Collector/SDK sends OTLP to the gateway with
+   `Authorization: Bearer <jwt>`. The gateway verifies the token, stamps
+   `ResourceAttributes['tenant']`, and writes via the stock exporter.
+3. Reads are isolated by ClickHouse row policies bound to a per-tenant
+   `<tenant>_ro` user, so a tenant sees only its own rows and can point
+   Grafana's default OTel dashboards straight at the shared database.
+
+Tokens are short-lived; rotation before expiry is automated operator-side
+(gitops#89) so the signing key never enters the cluster.
 
 ## Architecture
 
@@ -112,6 +210,18 @@ The pipeline runs:
 3. `golangci-lint` — lint (`v2.12.2`)
 4. `go build` — compilation
 5. `go test` — integration tests against a live ClickHouse 25.5 service
+6. **End-to-end harness** — stands up the upstream
+   `otel/opentelemetry-collector-contrib` (with
+   [`ci/otel-collector-config.yaml`](ci/otel-collector-config.yaml))
+   pointed at the same ClickHouse service, drives sample OTLP
+   traces/metrics/logs into it with the in-repo `otelhouse-emit`
+   binary, runs the
+   `otelhouse-api` binary as a Dagger service against ClickHouse, and
+   runs the `TestE2E_API` Go test (build tag `e2e`) which hits
+   `/api/runs`, `/api/traces/:id` and `/api/logs?traceId=:id` and asserts
+   the API renders the ingested data. This is the
+   `Dagger → OTLP → Collector → ClickHouse → API` guarantee for the whole
+   harness — one pipeline run validates everything end-to-end.
 
 ## Connecting traces and logs
 
@@ -166,7 +276,8 @@ WHERE m.ServiceName = 'checkout'
 
 Metrics ingestion is **alpha** in the upstream `clickhouseexporter` and the
 schema may shift between releases. The contrib image tag pinned in
-`ci/main.go` (`otelContribTag`) is the source of truth for what the tables
-actually look like at any commit — the Dagger harness runs an end-to-end
-test (`telemetrygen` → Collector → ClickHouse) against that pin so a green
-CI run implies the metric tables are populated with the expected shape.
+`ci/main.go` (`otelCollectorVersion`) is the source of truth for what the
+tables actually look like at any commit — the Dagger harness runs an
+end-to-end test (`otelhouse-emit` → Collector → ClickHouse → query API)
+against that pin so a green CI run implies the metric tables are populated
+with the expected shape.

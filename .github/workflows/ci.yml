@@ -11,6 +11,9 @@ on:
 
 permissions:
   contents: read
+  # Lets the publish step push the gateway image to ghcr.io/guettli/otelhouse-gateway
+  # with the built-in GITHUB_TOKEN on pushes to main (no long-lived PAT needed).
+  packages: write
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -88,4 +91,10 @@ jobs:
           exit 1
 
       - name: Run Dagger pipeline
+        # GHCR_* are consumed by publishGatewayImage (ci/gateway.go), which only
+        # publishes on pushes to main/tags; on PRs the publish step is a no-op so
+        # these are unused there. The built-in token can push packages for this repo.
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: cd ci && go run .

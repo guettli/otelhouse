@@ -1,0 +1,55 @@
+# OpenTelemetry Collector configuration for the otelhouse integration harness.
+#
+# Mirrors the production k8s deployment minus the bearer-token auth that fronts
+# the public OTLP endpoint — the CI run is on a private Dagger service network
+# so everything stays unauthenticated.
+#
+# Schema ownership: the upstream clickhouseexporter (create_schema: true) owns
+# the otel_traces / otel_logs / otel_metrics_* tables and creates them on
+# first insert. otelhouse does NOT write a parallel schema.
+#
+# ClickHouse connection details (host, db, credentials) are injected via env
+# vars so the YAML stays generic and the single source of truth lives in
+# ci/main.go (where the ClickHouse service binding is configured).
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+
+exporters:
+  clickhouse:
+    endpoint: tcp://${env:CLICKHOUSE_HOST}:9000?dial_timeout=10s
+    database: ${env:CLICKHOUSE_DB}
+    username: ${env:CLICKHOUSE_USER}
+    password: ${env:CLICKHOUSE_PASSWORD}
+    create_schema: true
+    timeout: 10s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [clickhouse]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [clickhouse]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [clickhouse]
