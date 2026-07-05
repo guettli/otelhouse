@@ -11,11 +11,11 @@ otelhouse is two things built around the
    agentloop tenants from **one shared ClickHouse** with per-tenant write and
    read isolation. This is the reusable output of the repo.
 2. **A Dagger-orchestrated end-to-end harness** for the
-   `Dagger → OTLP → Collector → ClickHouse → Query API → Svelte UI` stack,
-   proving the pipeline works as an integration unit.
+   `Dagger → OTLP → Collector → ClickHouse → Query API` stack, proving the
+   pipeline works as an integration unit.
 
 There is nothing to `go get` here — the shipped artifact is the gateway
-**image**, and the query API/UI are harness binaries. The high-level design
+**image**, and the query API is a harness binary. The high-level design
 comes from epics [#32](https://github.com/guettli/otelhouse/issues/32) and
 [#53](https://github.com/guettli/otelhouse/issues/53).
 
@@ -115,12 +115,10 @@ flowchart LR
     Collector["OTel Collector<br/>clickhouseexporter<br/>create_schema: true"]
     CH[("ClickHouse<br/>otel_traces / otel_logs<br/>otel_metrics_*")]
     API["Query API (#26)"]
-    UI["Svelte UI (#27)"]
 
     Dagger -- OTLP --> Collector
     Collector -- SQL INSERT --> CH
     CH -- SQL SELECT --> API
-    API -- HTTP/JSON --> UI
 ```
 
 `ci/main.go` wires every box of this diagram together in a single Dagger
@@ -161,10 +159,6 @@ that layer is what this repository builds:
   a small read-only service over the `otel_traces` / `otel_logs` /
   `otel_metrics_*` tables exposing endpoints like `GET /api/runs`,
   `GET /api/traces/:id` and `GET /api/logs?traceId=:id`.
-- **Svelte UI** ([#27](https://github.com/guettli/otelhouse/issues/27)) —
-  a SvelteKit frontend rendering a dashboard of recent Dagger runs and a
-  per-run detail page with a Gantt waterfall of spans and a log viewer
-  keyed by span.
 
 ### Existing ClickHouse UI tools
 
@@ -180,7 +174,7 @@ works against the `otel_*` tables and needs no setup beyond a DSN:
 
 Those tools answer "run an arbitrary SQL query"; they do not render a
 trace as a waterfall or stitch logs onto spans. That trace-shaped view
-is what the API + Svelte UI in this repo add on top.
+is what the Query API in this repo adds on top.
 
 ## Running it end-to-end
 
@@ -242,10 +236,9 @@ empty `SpanId` cannot be linked to a span, and a Collector pipeline that
 strips `TraceId`/`SpanId` (e.g. via `attributes/delete`) breaks the
 join.
 
-This is the data foundation the API
-([#26](https://github.com/guettli/otelhouse/issues/26)) and the
-visualization UI ([#27](https://github.com/guettli/otelhouse/issues/27))
-build on to render hyperlinks between a span and its logs (and back).
+This is the data foundation the Query API
+([#26](https://github.com/guettli/otelhouse/issues/26)) builds on to
+render hyperlinks between a span and its logs (and back).
 
 ## Connecting metrics to traces and logs
 
