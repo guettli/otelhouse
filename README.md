@@ -11,12 +11,19 @@ otelhouse is two things built around the
    agentloop tenants from **one shared ClickHouse** with per-tenant write and
    read isolation. This is the reusable output of the repo.
 2. **A Dagger-orchestrated end-to-end harness** for the
-   `Dagger → OTLP → Collector → ClickHouse → Query API` stack, proving the
-   pipeline works as an integration unit.
+   `Dagger → OTLP → Collector → ClickHouse` stack, proving the pipeline works
+   as an integration unit.
+
+otelhouse is the **write path**. Reading is
+[otelhouseview](https://github.com/guettli/otelhouseview): the
+`otelhouseview/otelstore` library (a read-only, typed client over the stock
+`otel_traces` / `otel_logs` tables) plus the service and UI built on it. This
+repo ships no query API of its own — the e2e harness here reads back what it
+wrote through that same library.
 
 There is nothing to `go get` here — the shipped artifact is the gateway
-**image**, and the query API is a harness binary. The high-level design
-comes from epics [#32](https://github.com/guettli/otelhouse/issues/32) and
+**image**. The high-level design comes from epics
+[#32](https://github.com/guettli/otelhouse/issues/32) and
 [#53](https://github.com/guettli/otelhouse/issues/53).
 
 ## Why otelhouse exists
@@ -114,15 +121,16 @@ flowchart LR
     Dagger["Dagger pipeline<br/>(producer)"]
     Collector["OTel Collector<br/>clickhouseexporter<br/>create_schema: true"]
     CH[("ClickHouse<br/>otel_traces / otel_logs<br/>otel_metrics_*")]
-    API["Query API (#26)"]
+    View["otelhouseview<br/>(separate repo)"]
 
     Dagger -- OTLP --> Collector
     Collector -- SQL INSERT --> CH
-    CH -- SQL SELECT --> API
+    CH -- SQL SELECT --> View
 ```
 
-`ci/main.go` wires every box of this diagram together in a single Dagger
-pipeline, then runs sample traffic through it and asserts the result.
+`ci/main.go` wires the write path of this diagram together in a single Dagger
+pipeline, then runs sample traffic through it and asserts the result — reading
+the rows back with `otelhouseview/otelstore`, the same library the viewer uses.
 
 ## Ingestion is codeless
 
@@ -145,20 +153,21 @@ Producers in the pipeline are configured against an OTLP/gRPC endpoint
 the same way they would be in production; nothing on the producer side
 is otelhouse-specific.
 
-## Querying needs custom code
+## Querying lives in otelhouseview
 
 OTel deliberately specifies ingestion (OTLP, semantic conventions) but
 *not* a query API: how you ask "show me the spans for run X with their
 child logs" is left to whatever store you chose. ClickHouse is no
 different — it gives you SQL, not OTel.
 
-A thin layer is therefore needed on top of the Collector's tables, and
-that layer is what this repository builds:
-
-- **Query API** ([#26](https://github.com/guettli/otelhouse/issues/26)) —
-  a small read-only service over the `otel_traces` / `otel_logs` /
-  `otel_metrics_*` tables exposing endpoints like `GET /api/runs`,
-  `GET /api/traces/:id` and `GET /api/logs?traceId=:id`.
+That thin read layer is **not** in this repository. It lives in
+[otelhouseview](https://github.com/guettli/otelhouseview):
+`github.com/guettli/otelhouseview/otelstore` is a read-only, typed client over
+the stock `otel_traces` / `otel_logs` tables (`ListTraces`, `GetTrace`), and
+the viewer's service and UI are built on it. It is deliberately tenant-blind:
+the isolation boundary is the ClickHouse identity in the DSN plus row policies,
+not a filter in Go. The e2e harness here is a consumer of that library like any
+other.
 
 ### Existing ClickHouse UI tools
 
@@ -174,7 +183,7 @@ works against the `otel_*` tables and needs no setup beyond a DSN:
 
 Those tools answer "run an arbitrary SQL query"; they do not render a
 trace as a waterfall or stitch logs onto spans. That trace-shaped view
-is what the Query API in this repo adds on top.
+is what otelhouseview adds on top.
 
 ## Running it end-to-end
 
@@ -209,13 +218,13 @@ The pipeline runs:
    [`ci/otel-collector-config.yaml`](ci/otel-collector-config.yaml))
    pointed at the same ClickHouse service, drives sample OTLP
    traces/metrics/logs into it with the in-repo `otelhouse-emit`
-   binary, runs the
-   `otelhouse-api` binary as a Dagger service against ClickHouse, and
-   runs the `TestE2E_API` Go test (build tag `e2e`) which hits
-   `/api/runs`, `/api/traces/:id` and `/api/logs?traceId=:id` and asserts
-   the API renders the ingested data. This is the
-   `Dagger → OTLP → Collector → ClickHouse → API` guarantee for the whole
-   harness — one pipeline run validates everything end-to-end.
+   binary, and runs the `TestE2E_Store` Go test (build tag `e2e`), which
+   reads the rows back out of ClickHouse through
+   `github.com/guettli/otelhouseview/otelstore` and asserts the ingested
+   traces and logs are there. This is the
+   `Dagger → OTLP → Collector → ClickHouse` guarantee for the whole
+   harness — one pipeline run validates the write path end-to-end, read
+   back with the same library the viewer uses.
 
 ## Connecting traces and logs
 
@@ -236,9 +245,8 @@ empty `SpanId` cannot be linked to a span, and a Collector pipeline that
 strips `TraceId`/`SpanId` (e.g. via `attributes/delete`) breaks the
 join.
 
-This is the data foundation the Query API
-([#26](https://github.com/guettli/otelhouse/issues/26)) builds on to
-render hyperlinks between a span and its logs (and back).
+This is the data foundation otelhouseview builds on to render hyperlinks
+between a span and its logs (and back).
 
 ## Connecting metrics to traces and logs
 
@@ -271,6 +279,6 @@ Metrics ingestion is **alpha** in the upstream `clickhouseexporter` and the
 schema may shift between releases. The contrib image tag pinned in
 `ci/main.go` (`otelCollectorVersion`) is the source of truth for what the
 tables actually look like at any commit — the Dagger harness runs an
-end-to-end test (`otelhouse-emit` → Collector → ClickHouse → query API)
-against that pin so a green CI run implies the metric tables are populated
-with the expected shape.
+end-to-end test (`otelhouse-emit` → Collector → ClickHouse) against that pin
+so a green CI run implies the metric tables are populated with the expected
+shape.

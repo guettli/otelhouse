@@ -98,8 +98,8 @@ func emitTraces(ctx context.Context, endpoint string, count int, res *resource.R
 
 	tracer := tp.Tracer("otelhouse-emit")
 	for i := 0; i < count; i++ {
-		// One root span per iteration with a single child, so /api/runs
-		// returns distinct runs and /api/traces/:id has a real hierarchy.
+		// One root span per iteration with a single child, so ListTraces
+		// returns distinct traces and GetTrace has a real hierarchy.
 		ctx, parent := tracer.Start(ctx, fmt.Sprintf("parent-%d", i))
 		_, child := tracer.Start(ctx, fmt.Sprintf("child-%d", i))
 		child.SetAttributes(attribute.Int("iter", i))
