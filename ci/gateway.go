@@ -34,8 +34,10 @@ func buildGatewayImage(
 		// CGO_ENABLED=0 forces a fully static binary so it runs on
 		// distroless/static (no libc, no dynamic loader).
 		WithEnvVariable("CGO_ENABLED", "0").
-		// Pin ocb to the same version as builder-config.yaml's
-		// otelcol_version so image tag ↔ schema stay in lockstep.
+		// Pin ocb to otelCollectorVersion — the same version the component
+		// modules in builder-config.yaml are pinned to (that manifest has no
+		// otelcol_version key; builder v0.114.0 removed it), so the builder
+		// and the components it wires together stay in lockstep.
 		WithExec([]string{"go", "install",
 			"go.opentelemetry.io/collector/cmd/builder@v" + otelCollectorVersion}).
 		WithMountedDirectory("/src", src).
