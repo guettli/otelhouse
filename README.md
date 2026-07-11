@@ -4,12 +4,15 @@ otelhouse is two things built around the
 `OpenTelemetry → upstream Collector → ClickHouse` pipeline:
 
 1. **A deployed artifact — the multi-tenant OTLP gateway.** A custom
-   OpenTelemetry Collector distribution (JWT `tenantauth` + `tenanttagger`
-   around the **stock** `clickhouseexporter`) published as a container image,
-   `ghcr.io/guettli/otelhouse-gateway`, and deployed by
-   [gitops#73](https://github.com/guettli/gitops/issues/73) to serve many
-   agentloop tenants from **one shared ClickHouse** with per-tenant write and
-   read isolation. This is the reusable output of the repo.
+   OpenTelemetry Collector distribution (JWT `tenantauth` + `tenanttagger` +
+   `tenantratelimit` around the **stock** `clickhouseexporter`) published as a
+   container image, `ghcr.io/guettli/otelhouse-gateway`. It is **live**:
+   deployed from [gitops](https://github.com/guettli/gitops) (epic
+   [gitops#73](https://github.com/guettli/gitops/issues/73)) and already
+   serving **agentloop as a real tenant** — agentloop pushes OTLP with its
+   tenant JWT and reads its rows back as the `agentloop_ro` ClickHouse user.
+   Many tenants share **one ClickHouse** with per-tenant write and read
+   isolation. This is the reusable output of the repo.
 2. **A Dagger-orchestrated end-to-end harness** for the
    `Dagger → OTLP → Collector → ClickHouse` stack, proving the pipeline works
    as an integration unit.
@@ -81,7 +84,7 @@ The custom Collector distribution lives in [`collector/`](collector/):
   in-memory per-replica.
 - [`builder-config.yaml`](collector/builder-config.yaml) is the ocb config
   that pins upstream receiver/processor/exporter versions and pulls in
-  the two custom components — nothing else changes on the write path, so
+  the three custom components — nothing else changes on the write path, so
   the stock `clickhouseexporter` schema is preserved unchanged.
 - [`docs/jwt-contract.md`](docs/jwt-contract.md) is the wire contract the
   gitops mint job must produce (claims, algorithms, iss/aud).
@@ -116,32 +119,62 @@ Tokens are short-lived; rotation before expiry is automated operator-side
 
 ## Architecture
 
+The deployed reality — producers authenticate with a per-tenant JWT, the
+gateway stamps the tenant, the stock exporter writes, and reads are constrained
+by ClickHouse row policies bound to a per-tenant `<tenant>_ro` user:
+
 ```mermaid
 flowchart LR
-    Dagger["Dagger pipeline<br/>(producer)"]
-    Collector["OTel Collector<br/>clickhouseexporter<br/>create_schema: true"]
-    CH[("ClickHouse<br/>otel_traces / otel_logs<br/>otel_metrics_*")]
+    subgraph Producers
+        Agentloop["agentloop<br/>(live tenant)"]
+        Prod["other tenants"]
+    end
+
+    subgraph GW["otelhouse-gateway (ocb distro)"]
+        direction LR
+        Auth["tenantauth<br/>(EdDSA JWT)"]
+        Tag["tenanttagger<br/>(stamps tenant,<br/>fail-closed)"]
+        RL["tenantratelimit<br/>(per-tenant)"]
+        Exp["stock<br/>clickhouseexporter"]
+        Auth --> Tag --> RL --> Exp
+    end
+
+    CH[("shared ClickHouse<br/>otel_traces / otel_logs<br/>otel_metrics_*<br/>row policies on<br/>ResourceAttributes['tenant']")]
+    RO["per-tenant reads<br/>as &lt;tenant&gt;_ro"]
     View["otelhouseview<br/>(separate repo)"]
 
-    Dagger -- OTLP --> Collector
-    Collector -- SQL INSERT --> CH
-    CH -- SQL SELECT --> View
+    Agentloop -- "OTLP + tenant JWT" --> Auth
+    Prod -- "OTLP + tenant JWT" --> Auth
+    Exp -- "SQL INSERT" --> CH
+    CH --> RO --> View
 ```
 
-`ci/main.go` wires the write path of this diagram together in a single Dagger
-pipeline, then runs sample traffic through it and asserts the result — reading
-the rows back with `otelhouseview/otelstore`, the same library the viewer uses.
+Separately, `ci/` exercises a **stock-collector harness**: a Dagger pipeline
+drives sample OTLP into an upstream `otelcol-contrib` (config in
+[`ci/otel-collector-config.yaml`](ci/otel-collector-config.yaml)) pointed at an
+ephemeral ClickHouse, then reads the rows back with `otelhouseview/otelstore`
+and asserts them. That harness has no tenant layer — it proves the
+`OTLP → Collector → ClickHouse` plumbing and the stock schema, not the gateway's
+multi-tenancy (the gateway's own components are covered by their unit tests and
+by the gateway image build in `ci/gateway.go`).
 
-## Ingestion is codeless
+## Ingestion into ClickHouse is codeless
 
-The Collector owns ingestion end-to-end. There is no custom exporter, no
-custom schema and no Go code in this repository on the write path:
+To be precise about what is and is not custom: the **gateway** is Go code —
+`tenantauth`, `tenanttagger` and `tenantratelimit` all sit directly on the write
+path (`otlp → tenanttagger → tenantratelimit → memory_limiter → batch →
+clickhouseexporter`). What is codeless is the last hop: **writing into
+ClickHouse**. There is no custom exporter, no custom schema and no migrations
+in this repository.
 
 - The upstream
   [`clickhouseexporter`](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/exporter/clickhouseexporter)
-  in the standard
+  writes traces, logs and metrics directly. It is pulled in **unmodified** as a
+  pinned upstream module by [`collector/builder-config.yaml`](collector/builder-config.yaml),
+  so `SHOW CREATE TABLE otel.otel_traces` is byte-identical to a fresh stock
+  install. (The shipped gateway is an **ocb-built binary**, not the
   [`otelcol-contrib`](https://github.com/open-telemetry/opentelemetry-collector-releases)
-  distribution writes traces, logs and metrics directly.
+  distribution — contrib is only used as the collector in the `ci/` harness.)
 - `create_schema: true` makes the exporter create the `otel_traces`,
   `otel_logs` and `otel_metrics_*` tables (plus their materialized views
   and TTLs) on startup — no migrations to run.
@@ -149,9 +182,12 @@ custom schema and no Go code in this repository on the write path:
   [#25](https://github.com/guettli/otelhouse/issues/25); it duplicated
   the upstream exporter and was a maintenance liability.
 
-Producers in the pipeline are configured against an OTLP/gRPC endpoint
-the same way they would be in production; nothing on the producer side
-is otelhouse-specific.
+Producers speak plain OTLP/gRPC — but in production they are **not** entirely
+otelhouse-agnostic: a producer must present `Authorization: Bearer <tenant JWT>`,
+or `tenantauth` rejects the request and `tenanttagger` fail-closes and drops the
+batch rather than writing it unlabelled. Only the `ci/` harness producer is
+config-only agnostic, because that harness runs a stock collector with no auth on
+a private Dagger network.
 
 ## Querying lives in otelhouseview
 

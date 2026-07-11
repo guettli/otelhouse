@@ -13,15 +13,17 @@ endpoint.
 
 ## Custom metrics
 
-| Metric                                     | Type    | Labels                    | Emitted by       | Purpose |
-| ------------------------------------------ | ------- | ------------------------- | ---------------- | ------- |
-| `otelhouse_gateway_auth_rejections_total`  | Counter | `reason`                  | `tenantauth`     | Count OTLP requests refused by the JWT auth layer, categorised by why. |
-| `otelhouse_gateway_ingest_records_total`   | Counter | `tenant`, `signal`        | `tenanttagger`   | Count records that flowed through the processor, attributed to the signed tenant. |
+| Metric                                          | Type    | Labels                    | Emitted by          | Purpose |
+| ----------------------------------------------- | ------- | ------------------------- | ------------------- | ------- |
+| `otelhouse_gateway_auth_rejections_total`       | Counter | `reason`                  | `tenantauth`        | Count OTLP requests refused by the JWT auth layer, categorised by why. |
+| `otelhouse_gateway_ingest_records_total`        | Counter | `tenant`, `signal`        | `tenanttagger`      | Count records that flowed through the processor, attributed to the signed tenant. |
+| `otelhouse_gateway_ratelimit_dropped_total`     | Counter | `tenant`                  | `tenantratelimit`   | Count records rejected because the tenant was over its ingest rate limit. |
 
-Both counters follow the OTel Prometheus convention: the SDK exposes them
-as `<name>_total` on the scrape endpoint. Neither counter is emitted until
-its first increment, so a fresh gateway with no traffic reports no series
-(the operator sees "no data" rather than a misleading zero).
+All three counters follow the OTel Prometheus convention: the instruments are
+registered as `otelhouse_gateway_*` monotonic Sums and the SDK exposes them as
+`<name>_total` on the scrape endpoint. No counter is emitted until its first
+increment, so a fresh gateway with no traffic reports no series (the operator
+sees "no data" rather than a misleading zero).
 
 ### `otelhouse_gateway_auth_rejections_total{reason=...}`
 
@@ -63,6 +65,21 @@ never blank.
 Empty batches (`SpanCount() == 0` etc.) are no-ops for the counter so an
 idle tenant does not create a phantom zero series.
 
+### `otelhouse_gateway_ratelimit_dropped_total{tenant}`
+
+Incremented by the `tenantratelimit` processor by the number of records in a
+batch it rejects because the tenant's token bucket could not cover it. The
+batch is **not** silently discarded: the processor returns gRPC
+`RESOURCE_EXHAUSTED`, which the OTLP receiver maps to `RESOURCE_EXHAUSTED` /
+HTTP `429`, so the client sees the rejection and can retry.
+
+Like the ingest counter, the `tenant` label always comes from the signed claim.
+Buckets are in-memory per replica, so the counter is per replica too — sum
+across replicas before comparing against a configured limit.
+
+A nonzero rate means either a tenant is genuinely over-sending, or its limit is
+set too low. It is a dashboard/warn signal, not a page.
+
 ### Stock `clickhouseexporter` telemetry
 
 `clickhouseexporter` publishes the usual exporter helper counters on the
@@ -94,13 +111,18 @@ which exposes every metric described above at `http://<gateway>:8888/metrics`.
 
 ## Alerting
 
-The two operator-critical alerts are:
+The operator-critical alerts are:
 
 1. `otelhouse_gateway_auth_rejections_total{reason="expired"}` — nonzero
    rate → the rotation loop failed for at least one tenant. Loudly page.
 2. `sum by (tenant) (rate(otelhouse_gateway_ingest_records_total[10m]))
    == 0` for a tenant that was previously nonzero → tenant went silent
    (network, agent crash, expired token). Warn, don't page.
+
+Worth a dashboard panel and a warn (not a page):
+`sum by (tenant) (rate(otelhouse_gateway_ratelimit_dropped_total[10m])) > 0`
+— a tenant is losing data to its rate limit; either it is over-sending or its
+limit needs raising.
 
 Every other rejection reason usually means an attacker or a
 misconfigured client, not an operator emergency — track them on a

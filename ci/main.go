@@ -13,8 +13,9 @@ import (
 // clickhouseexporter creates on first insert; bump when the schema changes.
 const otelCollectorVersion = "0.114.0"
 
-// ClickHouse credentials used by every component in the harness (server,
-// collector exporter, query containers). Centralised here so the YAML stays
+// ClickHouse credentials used by every component in the harness (the
+// ClickHouse server itself, the collector's exporter, and the e2e container,
+// which binds ClickHouse directly). Centralised here so the YAML stays
 // generic and consumes them via ${env:...}.
 const (
 	clickhouseUser     = "test"
