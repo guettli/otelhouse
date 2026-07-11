@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	dagger.io/dagger v0.21.7
-	github.com/ClickHouse/clickhouse-go/v2 v2.47.0
+	github.com/guettli/otelhouseview v0.0.0-20260711173028-ef60bad81577
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc v0.20.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc v1.44.0
@@ -19,6 +19,7 @@ require (
 require (
 	github.com/99designs/gqlgen v0.17.89 // indirect
 	github.com/ClickHouse/ch-go v0.73.0 // indirect
+	github.com/ClickHouse/clickhouse-go/v2 v2.47.0 // indirect
 	github.com/Khan/genqlient v0.8.1 // indirect
 	github.com/adrg/xdg v0.5.3 // indirect
 	github.com/andybalholm/brotli v1.2.1 // indirect
