@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
 
@@ -27,6 +28,19 @@ const (
 	reasonBadIssuer     = "bad_issuer"
 	reasonBadAudience   = "bad_audience"
 	reasonMalformed     = "malformed"
+
+	// Kubernetes ServiceAccount-token source.
+
+	// reasonUnknownKID: the token's `kid` is not in the cluster JWKS, even
+	// after a refresh — a forged token, or one from another cluster.
+	reasonUnknownKID = "unknown_kid"
+	// reasonJWKSUnavailable: the cluster JWKS could not be fetched or
+	// parsed, so no ServiceAccount token can be verified right now. This is
+	// a gateway-side outage, not a producer error — alert on it.
+	reasonJWKSUnavailable = "jwks_unavailable"
+	// reasonUnmappedSA: the token verified, but its ServiceAccount identity
+	// maps to no tenant. Fail-closed: never defaulted to a fallback tenant.
+	reasonUnmappedSA = "unmapped_serviceaccount"
 )
 
 // authMetrics owns the observability signals emitted by the tenantauth
@@ -79,6 +93,20 @@ func classifyJWTError(err error) string {
 		return reasonBadAudience
 	case errors.Is(err, jwt.ErrTokenSignatureInvalid):
 		return reasonBadSignature
+	case errors.Is(err, jwt.ErrTokenRequiredClaimMissing):
+		// A token with NO `aud` (or no `iss`) is the same operator-visible
+		// failure as one with the wrong value — a producer that did not
+		// project its token for this gateway. golang-jwt distinguishes
+		// "missing" from "mismatched" only in the message, so match on that;
+		// anything else required-but-missing (exp, ...) stays `malformed`.
+		switch {
+		case strings.Contains(err.Error(), "aud claim is required"):
+			return reasonBadAudience
+		case strings.Contains(err.Error(), "iss claim is required"):
+			return reasonBadIssuer
+		default:
+			return reasonMalformed
+		}
 	default:
 		return reasonMalformed
 	}

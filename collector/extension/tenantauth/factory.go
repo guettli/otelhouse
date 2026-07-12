@@ -21,10 +21,27 @@ func NewFactory() extension.Factory {
 	)
 }
 
+// createDefaultConfig returns the defaults an operator's config is merged
+// into. Neither identity source is enabled by default — no key material, no
+// serviceaccount.enabled — so a config that names the extension without
+// configuring an identity source fails Validate() rather than starting a
+// gateway that trusts nobody (or, worse, everybody).
 func createDefaultConfig() component.Config {
 	return &Config{
 		Algorithm:   "EdDSA",
 		TenantClaim: defaultTenantClaim,
+		ServiceAccount: &ServiceAccountConfig{
+			Enabled:                false,
+			Audience:               defaultSAAudience,
+			JWKSURL:                defaultSAJWKSURL,
+			CAFile:                 defaultSACAFile,
+			TokenFile:              defaultSATokenFile,
+			Algorithms:             defaultSAAlgorithms(),
+			JWKSMinRefreshInterval: defaultSAMinRefresh,
+			// One namespace per tenant is the tenancy model; an explicit
+			// tenant_map entry overrides it per ServiceAccount.
+			NamespaceAsTenant: true,
+		},
 	}
 }
 

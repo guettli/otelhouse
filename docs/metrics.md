@@ -15,7 +15,7 @@ endpoint.
 
 | Metric                                          | Type    | Labels                    | Emitted by          | Purpose |
 | ----------------------------------------------- | ------- | ------------------------- | ------------------- | ------- |
-| `otelhouse_gateway_auth_rejections_total`       | Counter | `reason`                  | `tenantauth`        | Count OTLP requests refused by the JWT auth layer, categorised by why. |
+| `otelhouse_gateway_auth_rejections_total`       | Counter | `reason`                  | `tenantauth`        | Count OTLP requests refused by the auth layer (ServiceAccount tokens and minted JWTs alike), categorised by why. |
 | `otelhouse_gateway_ingest_records_total`        | Counter | `tenant`, `signal`        | `tenanttagger`      | Count records that flowed through the processor, attributed to the signed tenant. |
 | `otelhouse_gateway_ratelimit_dropped_total`     | Counter | `tenant`                  | `tenantratelimit`   | Count records rejected because the tenant was over its ingest rate limit. |
 
@@ -32,11 +32,14 @@ Incremented once per OTLP request the `tenantauth` extension rejects. The
 
 | Reason           | Meaning                                                                 |
 | ---------------- | ----------------------------------------------------------------------- |
-| `expired`        | JWT `exp` is in the past. **The rotation loop missed the TTL.** Alert on any nonzero rate here.
-| `bad_signature`  | Signature did not verify — includes `alg:none`, alg-confusion, wrong key, tampered token.
-| `bad_issuer`     | JWT `iss` did not match the gateway's configured issuer.
-| `bad_audience`   | JWT `aud` did not match the gateway's configured audience.
-| `missing_tenant` | Token verified cryptographically but had no (or empty) tenant claim.
+| `expired`        | Token `exp` is in the past. For a minted JWT: **the rotation loop missed the TTL** — alert on any nonzero rate. For a projected ServiceAccount token: the producer stopped re-reading the file the kubelet refreshes.
+| `bad_signature`  | Signature did not verify — includes `alg:none`, alg-confusion (HS256 signed with a published public key), wrong key, tampered token.
+| `bad_issuer`     | Token `iss` did not match the configured issuer (the cluster's OIDC issuer, or the mint's issuer).
+| `bad_audience`   | Token `aud` did not match / did not contain the gateway's audience. For ServiceAccount tokens this is the **replay guard**: a token projected for the API server (or missing `audience:` entirely in the Pod spec) lands here.
+| `missing_tenant` | A minted JWT verified cryptographically but had no (or empty) `tenant` claim.
+| `unmapped_serviceaccount` | A ServiceAccount token verified, but its identity maps to no tenant: not in `tenant_map`, and its namespace is not an allowed tenant namespace. **Fail-closed — never defaulted.** Expect this when a new producer is enrolled without its gitops-side mapping.
+| `unknown_kid`    | The token's `kid` is not in the cluster JWKS, even after a refresh — a forged token, or one from another cluster.
+| `jwks_unavailable` | The gateway could not fetch/parse the cluster JWKS, so no ServiceAccount token can be verified. This is a **gateway-side outage**, not a producer error: alert on it, since every in-cluster producer is failing auth while it lasts.
 | `malformed`      | Anything else: no `Authorization` header, wrong scheme, empty bearer, unparseable JWT, missing `exp`.
 
 A healthy gateway reports zero for every reason. In practice `expired` is
