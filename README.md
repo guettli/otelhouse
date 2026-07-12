@@ -4,13 +4,16 @@ otelhouse is two things built around the
 `OpenTelemetry → upstream Collector → ClickHouse` pipeline:
 
 1. **A deployed artifact — the multi-tenant OTLP gateway.** A custom
-   OpenTelemetry Collector distribution (JWT `tenantauth` + `tenanttagger` +
+   OpenTelemetry Collector distribution (`tenantauth` + `tenanttagger` +
    `tenantratelimit` around the **stock** `clickhouseexporter`) published as a
-   container image, `ghcr.io/guettli/otelhouse-gateway`. It is **live**:
-   deployed from [gitops](https://github.com/guettli/gitops) (epic
-   [gitops#73](https://github.com/guettli/gitops/issues/73)) and already
+   container image, `ghcr.io/guettli/otelhouse-gateway`. Producers
+   authenticate with their **Kubernetes ServiceAccount token** — the identity
+   the kubelet already issues and rotates for every pod — or, if they are not
+   in-cluster pods, with a minted JWT verified against a static public key.
+   It is **live**: deployed from [gitops](https://github.com/guettli/gitops)
+   (epic [gitops#73](https://github.com/guettli/gitops/issues/73)) and already
    serving **agentloop as a real tenant** — agentloop pushes OTLP with its
-   tenant JWT and reads its rows back as the `agentloop_ro` ClickHouse user.
+   token and reads its rows back as the `agentloop_ro` ClickHouse user.
    Many tenants share **one ClickHouse** with per-tenant write and read
    isolation. This is the reusable output of the repo.
 2. **A Dagger-orchestrated end-to-end harness** for the
@@ -50,9 +53,10 @@ of tenants, with **per-tenant credential-bound write isolation** and
 - **No tool provided the exact bridge**: stock schema, one ClickHouse, many
   tenants, credential-bound at both write and read time.
 
-otelhouse is the **thin bridge** that adds only the missing piece — a JWT
-`tenantauth` extension plus a `tenanttagger` processor that stamps the
-tenant onto every record from the verified token — while keeping every
+otelhouse is the **thin bridge** that adds only the missing piece — a
+`tenantauth` extension (Kubernetes ServiceAccount tokens, or minted JWTs)
+plus a `tenanttagger` processor that stamps the tenant onto every record
+from the verified token — while keeping every
 other part **stock**: stock OTLP receiver, stock `clickhouseexporter` and
 schema, ClickHouse row policies for reads. It deliberately does **not**
 reinvent the exporter or the schema.
@@ -65,10 +69,26 @@ the broader multi-tenancy design.
 
 The custom Collector distribution lives in [`collector/`](collector/):
 
-- [`extension/tenantauth`](collector/extension/tenantauth) verifies a
-  per-tenant EdDSA/ES256/RS256 JWT on every OTLP request and resolves the
-  bound tenant into the auth context. Algorithm pinning, `iss`/`aud`/`exp`
-  checks, `alg:none` and HS↔RS confusion are covered by
+- [`extension/tenantauth`](collector/extension/tenantauth) verifies the
+  bearer token on every OTLP request and resolves the tenant it may write as
+  into the auth context. Two identity sources, either or both enabled:
+  - **Kubernetes ServiceAccount tokens** (the default for in-cluster
+    producers). A projected SA token is an RS256 JWT signed by the API
+    server; the extension verifies it against the **cluster JWKS**
+    (`/openid/v1/jwks`, cached, refreshed on an unknown `kid`), requires the
+    producer to have projected it with `audience: otelhouse-gateway` — so a
+    token minted for the API server is not replayable at the gateway — and
+    derives the tenant from the signed ServiceAccount identity: the namespace
+    claim, or an explicit `<namespace>/<serviceaccount>` → tenant map for
+    producers whose namespace is not their tenant. **Unmapped identities are
+    rejected, never defaulted.** No secret to mint, distribute or rotate.
+  - **Static-PEM minted JWTs** (EdDSA/ES256/RS256) for any producer that is
+    not an in-cluster pod: verified against a public key in the config, with
+    the tenant in a signed claim.
+
+  Algorithm pinning (never HS\*, never `alg:none`), `iss`/`aud`/`exp` checks,
+  unknown `kid`, unmapped ServiceAccounts and tenant-spoofing attempts are
+  covered by
   [`extension_test.go`](collector/extension/tenantauth/extension_test.go).
 - [`processor/tenanttagger`](collector/processor/tenanttagger) reads the
   authenticated tenant from `client.Info` and stamps it as
@@ -86,8 +106,9 @@ The custom Collector distribution lives in [`collector/`](collector/):
   that pins upstream receiver/processor/exporter versions and pulls in
   the three custom components — nothing else changes on the write path, so
   the stock `clickhouseexporter` schema is preserved unchanged.
-- [`docs/jwt-contract.md`](docs/jwt-contract.md) is the wire contract the
-  gitops mint job must produce (claims, algorithms, iss/aud).
+- [`docs/jwt-contract.md`](docs/jwt-contract.md) is the wire contract for
+  both identity sources (claims, algorithms, iss/aud, how the tenant is
+  derived) — and why the tenant may only ever come from a verified token.
 - [`docs/metrics.md`](docs/metrics.md) documents the per-tenant ingest and
   auth-rejection Prometheus metrics the gateway emits — the operator's
   view into "who is sending how much" and "which tenant just went silent
@@ -102,26 +123,60 @@ the code and the image; gitops owns the running stack, the shared ClickHouse,
 the keypair and the per-tenant secrets. The production wiring lives under
 `k8s/plain/otelhouse/` in gitops and is described in epic gitops#73.
 
-A tenant connects to the running gateway like any OTLP endpoint, plus a token:
+A tenant connects to the running gateway like any OTLP endpoint, plus a token.
 
-1. The operator mints a per-tenant JWT with the private key held in gitops
-   (`task k8s-mint-tenant-jwt -- <tenant>`) — see
-   [`docs/jwt-contract.md`](docs/jwt-contract.md) for the claims.
-2. The tenant's Collector/SDK sends OTLP to the gateway with
-   `Authorization: Bearer <jwt>`. The gateway verifies the token, stamps
-   `ResourceAttributes['tenant']`, and writes via the stock exporter.
+**In-cluster producers (the default): no secret at all.** The gateway is a
+ClusterIP Service with no IngressRoute, so every producer today is a pod in
+the cluster — and every pod already has a cryptographically verifiable
+identity the kubelet issues and rotates. Project it for the gateway:
+
+```yaml
+volumes:
+  - name: otlp-token
+    projected:
+      sources:
+        - serviceAccountToken:
+            audience: otelhouse-gateway
+            expirationSeconds: 3600
+            path: token
+```
+
+1. Mount that volume and send OTLP with
+   `Authorization: Bearer $(cat /var/run/secrets/otelhouse/token)` (build
+   `OTEL_EXPORTER_OTLP_HEADERS` from the file the kubelet keeps fresh).
+2. The gateway verifies the token against the cluster's JWKS, checks it was
+   projected for **this** audience, derives the tenant from the signed
+   ServiceAccount identity (namespace, or an explicit SA→tenant map entry),
+   stamps `ResourceAttributes['tenant']` and writes via the stock exporter.
+   An identity that maps to no tenant is rejected — never defaulted.
 3. Reads are isolated by ClickHouse row policies bound to a per-tenant
    `<tenant>_ro` user, so a tenant sees only its own rows and can point
    Grafana's default OTel dashboards straight at the shared database.
 
-Tokens are short-lived; rotation before expiry is automated operator-side
-(gitops#89) so the signing key never enters the cluster.
+Nothing to mint, nothing to rotate, nothing to expire: the `audience:` line
+in the Pod spec is the whole enrolment.
+
+**Producers that are not in-cluster pods:** the operator mints a per-tenant
+JWT with the private key held in gitops and the tenant sends it as
+`Authorization: Bearer <jwt>`; the gateway verifies it against the configured
+public key and reads the tenant from the signed `tenant` claim. Those tokens
+are short-lived and re-minted before expiry operator-side (gitops#89), so the
+signing key never enters the cluster.
+
+Both paths are documented claim-by-claim in
+[`docs/jwt-contract.md`](docs/jwt-contract.md), which also spells out why the
+tenant may only ever come from a verified token: every other tenant's
+row-policy isolation depends on that label being unforgeable, so a
+client-supplied `tenant` resource attribute is always overwritten, and a
+batch whose tenant cannot be derived from a verified claim is dropped.
 
 ## Architecture
 
-The deployed reality — producers authenticate with a per-tenant JWT, the
-gateway stamps the tenant, the stock exporter writes, and reads are constrained
-by ClickHouse row policies bound to a per-tenant `<tenant>_ro` user:
+The deployed reality — producers authenticate with their Kubernetes
+ServiceAccount token (or, if they are not in-cluster pods, a minted JWT), the
+gateway derives and stamps the tenant from the verified claims, the stock
+exporter writes, and reads are constrained by ClickHouse row policies bound to
+a per-tenant `<tenant>_ro` user:
 
 ```mermaid
 flowchart LR
@@ -132,19 +187,22 @@ flowchart LR
 
     subgraph GW["otelhouse-gateway (ocb distro)"]
         direction LR
-        Auth["tenantauth<br/>(EdDSA JWT)"]
+        Auth["tenantauth<br/>(cluster JWKS /<br/>static PEM)"]
         Tag["tenanttagger<br/>(stamps tenant,<br/>fail-closed)"]
         RL["tenantratelimit<br/>(per-tenant)"]
         Exp["stock<br/>clickhouseexporter"]
         Auth --> Tag --> RL --> Exp
     end
 
+    K8S[("cluster JWKS<br/>/openid/v1/jwks")]
+    K8S -. "verify SA tokens" .-> Auth
+
     CH[("shared ClickHouse<br/>otel_traces / otel_logs<br/>otel_metrics_*<br/>row policies on<br/>ResourceAttributes['tenant']")]
     RO["per-tenant reads<br/>as &lt;tenant&gt;_ro"]
     View["otelhouseview<br/>(separate repo)"]
 
-    Agentloop -- "OTLP + tenant JWT" --> Auth
-    Prod -- "OTLP + tenant JWT" --> Auth
+    Agentloop -- "OTLP + projected<br/>SA token" --> Auth
+    Prod -- "OTLP + SA token<br/>or minted JWT" --> Auth
     Exp -- "SQL INSERT" --> CH
     CH --> RO --> View
 ```
@@ -183,7 +241,8 @@ in this repository.
   the upstream exporter and was a maintenance liability.
 
 Producers speak plain OTLP/gRPC — but in production they are **not** entirely
-otelhouse-agnostic: a producer must present `Authorization: Bearer <tenant JWT>`,
+otelhouse-agnostic: a producer must present `Authorization: Bearer <token>` (its
+projected ServiceAccount token, or a minted JWT if it is not an in-cluster pod),
 or `tenantauth` rejects the request and `tenanttagger` fail-closes and drops the
 batch rather than writing it unlabelled. Only the `ci/` harness producer is
 config-only agnostic, because that harness runs a stock collector with no auth on
