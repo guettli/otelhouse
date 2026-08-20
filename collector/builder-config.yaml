@@ -43,6 +43,12 @@ extensions:
 processors:
   - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.114.0
   - gomod: go.opentelemetry.io/collector/processor/memorylimiterprocessor v0.114.0
+  # Stock transform processor (OTTL), pulled in unmodified. It is the codeless
+  # secret-redaction stage (#46): the runtime config loads the gitleaks-derived
+  # OTTL statements from collector/redaction.yaml into a `transform/redaction`
+  # instance ahead of `batch`. Only the rule pack is generated; the component
+  # is stock, so this stays consistent with "stock components only".
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/transformprocessor v0.114.0
   - gomod: github.com/guettli/otelhouse/collector/processor/tenanttagger v0.1.0
   - gomod: github.com/guettli/otelhouse/collector/processor/tenantratelimit v0.1.0
 

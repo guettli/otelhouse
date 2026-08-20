@@ -224,6 +224,10 @@ func runE2E(
 	if _, err := goBase.
 		WithFile("/usr/local/bin/otelcol-contrib", collectorBin).
 		WithFile("/etc/otelcol/config.yaml", src.File("ci/otel-collector-config.yaml")).
+		// The redaction rules the config loads via ${file:...}: the gitleaks
+		// rule pack expanded into transform/OTTL statements (#46). Mounted
+		// next to config.yaml at the path the config references.
+		WithFile("/etc/otelcol/redaction.yaml", src.File("collector/redaction.yaml")).
 		// The e2e test dials ClickHouse itself, so the test container needs
 		// the same inbound service binding the Collector uses.
 		WithServiceBinding("clickhouse", clickhouse).
@@ -236,6 +240,9 @@ func runE2E(
 		WithEnvVariable("OTELHOUSE_E2E_CLICKHOUSE_DSN", clickhouseDSN).
 		WithEnvVariable("OTELHOUSE_E2E_LOG_TRACE_ID", e2eLogsTraceID).
 		WithEnvVariable("OTELHOUSE_E2E_LOG_SPAN_ID", e2eLogsSpanID).
+		// Read by ci/redaction_test.go, which emits a fake secret straight at
+		// the Collector's OTLP endpoint and asserts it comes back redacted.
+		WithEnvVariable("OTELHOUSE_E2E_OTLP_ENDPOINT", "127.0.0.1:4317").
 		WithExec([]string{"sh", "-c", e2eScript}).
 		Sync(ctx); err != nil {
 		return fmt.Errorf("e2e harness: %w", err)
