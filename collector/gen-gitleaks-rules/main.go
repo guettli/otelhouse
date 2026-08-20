@@ -126,22 +126,31 @@ func render(rules []rule, skipped []string) string {
 		fmt.Fprintf(&b, "# Skipped: %s\n", strings.Join(skipped, ", "))
 	}
 	b.WriteString("#\n")
-	b.WriteString("# This is the body of a stock `transform` processor. The harness config\n")
-	b.WriteString("# (ci/otel-collector-config.yaml) loads it with\n")
-	b.WriteString("#   transform/redaction: ${file:/etc/otelcol/redaction.yaml}\n")
-	b.WriteString("# and runs it ahead of `batch` in the logs and traces pipelines. Each rule\n")
-	b.WriteString("# replaces any matching substring in a log body or a log/span attribute\n")
-	b.WriteString("# value with REDACTED:<ruleID>, so secrets never reach ClickHouse.\n")
+	b.WriteString("# This is a full config fragment defining a stock `transform` processor.\n")
+	b.WriteString("# The harness starts the collector with two --config flags — the base\n")
+	b.WriteString("# ci/otel-collector-config.yaml plus this file — and the collector\n")
+	b.WriteString("# deep-merges them, so transform/redaction is defined here and only\n")
+	b.WriteString("# referenced by name in the base config's logs and traces pipelines,\n")
+	b.WriteString("# ahead of `batch`. Each rule replaces any matching substring in a log\n")
+	b.WriteString("# body or a log/span attribute value with REDACTED:<ruleID>, so secrets\n")
+	b.WriteString("# never reach ClickHouse.\n")
+	b.WriteString("#\n")
+	b.WriteString("# It is merged as a second --config rather than embedded via\n")
+	b.WriteString("# ${file:...}: value-embedding a large regex set wraps every statement in\n")
+	b.WriteString("# confmap's expandedValue machinery, which the collector could not resolve\n")
+	b.WriteString("# (\"too many recursive expansions\"). Deep-merge sidesteps that entirely.\n")
 	b.WriteString("#\n")
 	b.WriteString("# Regenerate with: cd collector/gen-gitleaks-rules && go run .\n")
 	b.WriteString("\n")
 
-	b.WriteString("error_mode: ignore\n")
+	b.WriteString("processors:\n")
+	b.WriteString("  transform/redaction:\n")
+	b.WriteString("    error_mode: ignore\n")
 	b.WriteString("\n")
 
-	b.WriteString("log_statements:\n")
-	b.WriteString("  - context: log\n")
-	b.WriteString("    statements:\n")
+	b.WriteString("    log_statements:\n")
+	b.WriteString("      - context: log\n")
+	b.WriteString("        statements:\n")
 	for _, r := range rules {
 		b.WriteString(stmtLine(fmt.Sprintf(
 			`replace_pattern(body, "%s", "REDACTED:%s")`, ottlEscape(r.regex), r.id)))
@@ -150,9 +159,9 @@ func render(rules []rule, skipped []string) string {
 	}
 	b.WriteString("\n")
 
-	b.WriteString("trace_statements:\n")
-	b.WriteString("  - context: span\n")
-	b.WriteString("    statements:\n")
+	b.WriteString("    trace_statements:\n")
+	b.WriteString("      - context: span\n")
+	b.WriteString("        statements:\n")
 	for _, r := range rules {
 		b.WriteString(stmtLine(fmt.Sprintf(
 			`replace_all_patterns(attributes, "value", "%s", "REDACTED:%s")`, ottlEscape(r.regex), r.id)))
@@ -161,13 +170,14 @@ func render(rules []rule, skipped []string) string {
 	return b.String()
 }
 
-// stmtLine renders one OTTL statement as a YAML single-quoted list item.
-// Single-quoted YAML passes backslashes and double quotes through verbatim
-// (only a literal single quote needs doubling), which keeps the two escaping
-// layers independent: YAML leaves the string alone, and OTTL then unquotes the
-// inner "..." itself.
+// stmtLine renders one OTTL statement as a YAML single-quoted list item under
+// processors.transform/redaction.<log|trace>_statements[].statements (10-space
+// indent). Single-quoted YAML passes backslashes and double quotes through
+// verbatim (only a literal single quote needs doubling), which keeps the two
+// escaping layers independent: YAML leaves the string alone, and OTTL then
+// unquotes the inner "..." itself.
 func stmtLine(stmt string) string {
-	return "      - '" + strings.ReplaceAll(stmt, "'", "''") + "'\n"
+	return "          - '" + strings.ReplaceAll(stmt, "'", "''") + "'\n"
 }
 
 // ottlEscape prepares a Go/RE2 regex for embedding inside an OTTL

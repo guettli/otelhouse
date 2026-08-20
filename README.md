@@ -263,13 +263,17 @@ they land in ClickHouse**, and does it without a line of write-path Go:
   [`collector/redaction.yaml`](collector/redaction.yaml) — committed, so the
   full expanded regex set shows up in review. The header pins the gitleaks
   version it was generated from.
-- The collector loads that file into a `transform/redaction` processor and runs
-  it ahead of `batch` on the logs and traces pipelines, replacing any matching
-  substring in a log body or a log/span attribute value with
-  `REDACTED:<ruleID>`. The processor is the unmodified upstream
-  `transformprocessor` (added to
-  [`builder-config.yaml`](collector/builder-config.yaml)); only the rule pack is
-  generated, so this stays consistent with "stock components only".
+- `redaction.yaml` is a full config fragment defining the processor. The
+  collector deep-merges it in as a second `--config` file, so the base config
+  only references `transform/redaction` by name in its pipelines. (It is merged
+  rather than embedded via `${file:...}`: value-embedding the large regex set
+  wraps every statement in confmap's expansion machinery, which fails to
+  resolve — "too many recursive expansions".)
+- The processor runs ahead of `batch` on the logs and traces pipelines,
+  replacing any matching substring in a log body or a log/span attribute value
+  with `REDACTED:<ruleID>`. It is the unmodified upstream `transformprocessor`
+  (added to [`builder-config.yaml`](collector/builder-config.yaml)); only the
+  rule pack is generated, so this stays consistent with "stock components only".
 
 Refreshing after a gitleaks release is mechanical: bump the version in
 `collector/gitleaks.toml`, rerun the generator, review the `redaction.yaml`

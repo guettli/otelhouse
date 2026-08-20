@@ -224,9 +224,9 @@ func runE2E(
 	if _, err := goBase.
 		WithFile("/usr/local/bin/otelcol-contrib", collectorBin).
 		WithFile("/etc/otelcol/config.yaml", src.File("ci/otel-collector-config.yaml")).
-		// The redaction rules the config loads via ${file:...}: the gitleaks
-		// rule pack expanded into transform/OTTL statements (#46). Mounted
-		// next to config.yaml at the path the config references.
+		// The gitleaks rule pack expanded into a transform/redaction processor
+		// (#46), passed as a second --config the collector deep-merges with the
+		// base config below.
 		WithFile("/etc/otelcol/redaction.yaml", src.File("collector/redaction.yaml")).
 		// The e2e test dials ClickHouse itself, so the test container needs
 		// the same inbound service binding the Collector uses.
@@ -283,7 +283,15 @@ go build -o /usr/local/bin/otelhouse-emit ./cmd/otelhouse-emit
 mkdir -p /tmp/e2e
 
 echo "[e2e-sh] starting otel-collector-contrib (background)"
-/usr/local/bin/otelcol-contrib --config=/etc/otelcol/config.yaml \
+# Two --config files: the base pipeline config plus the generated
+# transform/redaction processor. The collector deep-merges them, so
+# transform/redaction is defined in redaction.yaml and only referenced by
+# name in the base config's pipelines. (Embedding redaction.yaml via
+# ${file:...} instead makes confmap fail with "too many recursive
+# expansions" on the large regex set — see collector/redaction.yaml.)
+/usr/local/bin/otelcol-contrib \
+  --config=/etc/otelcol/config.yaml \
+  --config=/etc/otelcol/redaction.yaml \
   > /tmp/e2e/collector.log 2>&1 &
 COLLECTOR_PID=$!
 

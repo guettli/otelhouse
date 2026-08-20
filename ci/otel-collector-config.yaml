@@ -24,11 +24,12 @@
 # Secret redaction is codeless too (see #46): transform/redaction is a stock
 # `transform` processor whose OTTL statements are generated from the gitleaks
 # rule pack by collector/gen-gitleaks-rules and committed as
-# collector/redaction.yaml. ci/main.go mounts that file at
-# /etc/otelcol/redaction.yaml, and the ${file:...} provider loads it as the
-# processor body below. It runs ahead of `batch` on the logs and traces
-# pipelines, so a secret that slips into a log body or a log/span attribute is
-# replaced with REDACTED:<ruleID> before the clickhouseexporter ever sees it.
+# collector/redaction.yaml. That file is NOT defined here — it is a second
+# --config file the collector deep-merges at startup (see ci/main.go), which
+# is why the processor is only referenced by name in the pipelines below.
+# It runs ahead of `batch` on the logs and traces pipelines, so a secret that
+# slips into a log body or a log/span attribute is replaced with
+# REDACTED:<ruleID> before the clickhouseexporter ever sees it.
 
 receivers:
   otlp:
@@ -42,7 +43,8 @@ processors:
   batch:
     timeout: 1s
     send_batch_size: 1024
-  transform/redaction: ${file:/etc/otelcol/redaction.yaml}
+  # transform/redaction is defined in collector/redaction.yaml, deep-merged
+  # in as a second --config at startup (see ci/main.go).
 
 exporters:
   clickhouse:
