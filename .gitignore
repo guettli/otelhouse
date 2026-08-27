@@ -35,3 +35,8 @@ go.work.sum
 .vscode
 /*.kubeconfig
 /*.log
+
+# ocb build output (collector/builder-config.yaml dist.output_path).
+# Normally produced inside the Dagger builder container, but a local
+# `builder --config=builder-config.yaml` writes it into the checkout.
+/collector/_build/
