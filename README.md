@@ -248,6 +248,39 @@ batch rather than writing it unlabelled. Only the `ci/` harness producer is
 config-only agnostic, because that harness runs a stock collector with no auth on
 a private Dagger network.
 
+### Redaction is codeless too
+
+Secrets sometimes slip into telemetry — an access key logged in an error
+string, a token stuffed into a span attribute. otelhouse scrubs them **before
+they land in ClickHouse**, and does it without a line of write-path Go:
+
+- The rules come from [gitleaks](https://github.com/gitleaks/gitleaks): a
+  pinned copy of its default ruleset lives in
+  [`collector/gitleaks.toml`](collector/gitleaks.toml).
+- [`collector/gen-gitleaks-rules`](collector/gen-gitleaks-rules) is an offline
+  generator (run by hand, not at build time) that expands each rule's regex
+  into stock `transform`/OTTL statements and writes
+  [`collector/redaction.yaml`](collector/redaction.yaml) — committed, so the
+  full expanded regex set shows up in review. The header pins the gitleaks
+  version it was generated from.
+- `redaction.yaml` is a full config fragment defining the processor. The
+  collector deep-merges it in as a second `--config` file, so the base config
+  only references `transform/redaction` by name in its pipelines. (It is merged
+  rather than embedded via `${file:...}`: value-embedding the large regex set
+  wraps every statement in confmap's expansion machinery, which fails to
+  resolve — "too many recursive expansions".)
+- The processor runs ahead of `batch` on the logs and traces pipelines,
+  replacing any matching substring in a log body or a log/span attribute value
+  with `REDACTED:<ruleID>`. It is the unmodified upstream `transformprocessor`
+  (added to [`builder-config.yaml`](collector/builder-config.yaml)); only the
+  rule pack is generated, so this stays consistent with "stock components only".
+
+Refreshing after a gitleaks release is mechanical: bump the version in
+`collector/gitleaks.toml`, rerun the generator, review the `redaction.yaml`
+diff, commit. The `ci/` harness proves it end to end — `redaction_test.go`
+sends a fake-but-rule-matching AWS key straight at the Collector and asserts the
+row in ClickHouse carries `REDACTED:aws-access-token` and never the literal.
+
 ## Querying lives in otelhouseview
 
 OTel deliberately specifies ingestion (OTLP, semantic conventions) but

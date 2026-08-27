@@ -224,6 +224,10 @@ func runE2E(
 	if _, err := goBase.
 		WithFile("/usr/local/bin/otelcol-contrib", collectorBin).
 		WithFile("/etc/otelcol/config.yaml", src.File("ci/otel-collector-config.yaml")).
+		// The gitleaks rule pack expanded into a transform/redaction processor
+		// (#46), passed as a second --config the collector deep-merges with the
+		// base config below.
+		WithFile("/etc/otelcol/redaction.yaml", src.File("collector/redaction.yaml")).
 		// The e2e test dials ClickHouse itself, so the test container needs
 		// the same inbound service binding the Collector uses.
 		WithServiceBinding("clickhouse", clickhouse).
@@ -236,6 +240,9 @@ func runE2E(
 		WithEnvVariable("OTELHOUSE_E2E_CLICKHOUSE_DSN", clickhouseDSN).
 		WithEnvVariable("OTELHOUSE_E2E_LOG_TRACE_ID", e2eLogsTraceID).
 		WithEnvVariable("OTELHOUSE_E2E_LOG_SPAN_ID", e2eLogsSpanID).
+		// Read by ci/redaction_test.go, which emits a fake secret straight at
+		// the Collector's OTLP endpoint and asserts it comes back redacted.
+		WithEnvVariable("OTELHOUSE_E2E_OTLP_ENDPOINT", "127.0.0.1:4317").
 		WithExec([]string{"sh", "-c", e2eScript}).
 		Sync(ctx); err != nil {
 		return fmt.Errorf("e2e harness: %w", err)
@@ -276,7 +283,15 @@ go build -o /usr/local/bin/otelhouse-emit ./cmd/otelhouse-emit
 mkdir -p /tmp/e2e
 
 echo "[e2e-sh] starting otel-collector-contrib (background)"
-/usr/local/bin/otelcol-contrib --config=/etc/otelcol/config.yaml \
+# Two --config files: the base pipeline config plus the generated
+# transform/redaction processor. The collector deep-merges them, so
+# transform/redaction is defined in redaction.yaml and only referenced by
+# name in the base config's pipelines. (Embedding redaction.yaml via
+# ${file:...} instead makes confmap fail with "too many recursive
+# expansions" on the large regex set — see collector/redaction.yaml.)
+/usr/local/bin/otelcol-contrib \
+  --config=/etc/otelcol/config.yaml \
+  --config=/etc/otelcol/redaction.yaml \
   > /tmp/e2e/collector.log 2>&1 &
 COLLECTOR_PID=$!
 
