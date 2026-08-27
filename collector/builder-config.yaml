@@ -39,6 +39,16 @@ dist:
 # the resulting schema by hand.
 extensions:
   - gomod: github.com/guettli/otelhouse/collector/extension/tenantauth v0.1.0
+  # pprof, so Parca can scrape heap/goroutine/mutex/block from the gateway.
+  # The eBPF agent already covers its CPU; this is the part it cannot see.
+  #
+  # It lives in contrib, not core: there is no
+  # go.opentelemetry.io/collector/extension/pprofextension module at any
+  # version. Compiling it in is what makes `pprof:` a valid config key --
+  # a config-only change crash-loops this custom distribution
+  # (unknown type: "pprof") and took tc ingest down once already
+  # (gitops#237, reverted by gitops#240).
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/pprofextension v0.114.0
 
 processors:
   - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.114.0
