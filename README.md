@@ -114,6 +114,34 @@ The custom Collector distribution lives in [`collector/`](collector/):
   view into "who is sending how much" and "which tenant just went silent
   because a token expired."
 
+### Read-path at scale
+
+Read **isolation** is enforced by the ClickHouse row policies and is correct at
+any tenant count. Read **performance** has a ceiling worth stating honestly,
+the same way the per-tenant rate limiter's per-replica bucket ceiling is stated
+above. The tenant lives in `ResourceAttributes`, **not** in the sort key of the
+stock schema (`otel_logs` orders by
+`(toStartOfFiveMinutes(Timestamp), ServiceName, Timestamp)`, `otel_traces` by
+`(ServiceName, SpanName, toDateTime(Timestamp))`; both `PARTITION BY
+toDate(Timestamp)`). A per-tenant read is pruned only by the stock
+`INDEX idx_res_attr_value … TYPE bloom_filter(0.01)` skip index — at a 1%
+false-positive rate — and every tenant shares the same date-partitioned parts,
+so surviving granules still contain other tenants' rows that the row policy
+filters out **after** the granule is read. Isolation stays correct; the cost is
+read amplification that grows with how many tenants co-occupy the parts a query
+touches.
+
+Keeping the pure stock schema is a deliberate design goal, so otelhouse ships no
+tenant-leading index. The escape hatch is the one upstream already sanctions:
+set `create_schema: false` and manage your own DDL — adding a tenant-leading
+data-skipping index, a projection, or the tenant into the `ORDER BY` — to trade
+away pure-stock parity for a flatter read curve. That is an operator's
+knowing choice, not something otelhouse decides on their behalf. The full
+analysis (and an offer to turn the ceiling into a measured number via a Dagger
+e2e benchmark) is in
+[#75](https://github.com/guettli/otelhouse/issues/75); the read-path trade-off
+is also now documented upstream in the `clickhouseexporter` Performance Guide.
+
 ### Deploying & consuming the gateway
 
 The gateway is built and published as `ghcr.io/guettli/otelhouse-gateway` by
