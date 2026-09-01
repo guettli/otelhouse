@@ -235,6 +235,19 @@ The claim the tenant is read from is configurable (`tenant_claim`, default
 exposed on `client.Info.Auth` — for **both** sources — so it must match
 `tenanttagger`'s `auth_attribute`.
 
+> **Attribute-name note (`tenant` vs. `tenant.id`).** otelhouse stamps the
+> tenant under `ResourceAttributes['tenant']`. The upstream
+> `clickhouseexporter` multi-tenant discussion
+> ([open-telemetry/opentelemetry-collector-contrib#49429](https://github.com/open-telemetry/opentelemetry-collector-contrib/discussions/49429))
+> uses `ResourceAttributes['tenant.id']` in its examples. Both are the same
+> pattern — tenant carried as a resource-attribute map key on a single shared
+> table — and there is no OTel semantic-convention key for a tenant identifier
+> today, so neither is "more correct". otelhouse keeps `tenant` deliberately:
+> the ClickHouse row policies, the `<tenant>_ro` users, and every stored row
+> already key on it, so renaming to `tenant.id` would break read isolation for
+> existing data with no functional gain. If you are copying a query from the
+> upstream docs, substitute `tenant` for `tenant.id`.
+
 ### Gateway config
 
 ```yaml
