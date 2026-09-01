@@ -341,6 +341,64 @@ Those tools answer "run an arbitrary SQL query"; they do not render a
 trace as a waterfall or stitch logs onto spans. That trace-shaped view
 is what otelhouseview adds on top.
 
+## Read path at scale
+
+Per-tenant read **isolation** is enforced by ClickHouse row policies bound to
+the `<tenant>_ro` user, and it holds at any tenant count: a tenant cannot see
+another tenant's rows, because the label those policies key on is stamped from
+a verified token and never client-supplied. What does change with tenant count
+is read **latency** — a property of the stock schema this repo deliberately
+keeps.
+
+The tenant lives in `ResourceAttributes['tenant']`. In the stock schema that
+map is reachable through a skip index — `INDEX idx_res_attr_value
+mapValues(ResourceAttributes) TYPE bloom_filter(0.01) GRANULARITY 1` (or a
+`text` index where the exporter's full-text search is enabled) — but it is
+**not part of the sort key**:
+
+| Table         | `ORDER BY`                                                  | `PARTITION BY`     |
+| ------------- | ----------------------------------------------------------- | ------------------ |
+| `otel_logs`   | `(toStartOfFiveMinutes(Timestamp), ServiceName, Timestamp)`  | `toDate(Timestamp)` |
+| `otel_traces` | `(ServiceName, SpanName, toDateTime(Timestamp))`             | `toDate(Timestamp)` |
+
+So a single tenant reading a wide time range gets correct rows, but:
+
+1. the bloom filter prunes only **some** granules, at a 1% false-positive
+   rate, and
+2. every tenant shares the same date-partitioned parts, so the granules that
+   survive pruning still contain other tenants' rows — the row policy filters
+   them **after** the granule has been read.
+
+The net effect is read amplification that grows with how many tenants
+co-occupy the parts a given query touches. Isolation stays correct throughout;
+it is scan-bytes and latency that degrade as tenant count climbs and dashboard
+reads run concurrently.
+
+This is a property of the stock schema, **not something to fix upstream**. The
+exporter has no tenant concept to sort by — the tenant label is otelhouse's
+addition — and a tenant-leading sort key would regress the ordinary
+single-tenant "time range + service" query for every other user of the
+exporter. Upstream's own position is that this is the deployer's call: the
+[`clickhouseexporter` docs](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/exporter/clickhouseexporter)
+recommend managing your own schema with `create_schema: false` for production
+workloads, and note that any table shape works as long as the column names and
+types still match the exporter's `INSERT`.
+
+**The escape hatch**, if per-tenant read latency ever becomes the bottleneck:
+set `create_schema: false` and create the `otel_*` tables yourself with the
+tenant lifted out of the map — a tenant-leading `ORDER BY`, a projection, or a
+tenant-leading data-skipping index — keeping the columns compatible with the
+exporter's `INSERT`. That buys granule pruning by tenant, and costs this repo's
+"`SHOW CREATE TABLE` is byte-identical to a fresh stock install" property, and
+with it Grafana's default OTel dashboards working against the shared database
+unchanged. otelhouse keeps the stock schema by default because that trade
+belongs to the operator, not to the gateway.
+
+The ceiling above is reasoned from the schema, **not yet measured**:
+[#75](https://github.com/guettli/otelhouse/issues/75) tracks adding a
+per-tenant read-latency benchmark to the Dagger harness, so the limit becomes a
+number rather than an expectation.
+
 ## Running it end-to-end
 
 The [Dagger](https://dagger.io/) pipeline in `ci/main.go` is the **single
