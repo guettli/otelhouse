@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // jwksFetcher returns the raw JWKS document. It is an indirection so unit
@@ -46,6 +48,7 @@ var (
 type jwksCache struct {
 	fetch      jwksFetcher
 	minRefresh time.Duration
+	logger     *zap.Logger
 
 	mu          sync.RWMutex
 	keys        map[string]jwksKey
@@ -59,8 +62,11 @@ type jwksKey struct {
 	alg string
 }
 
-func newJWKSCache(fetch jwksFetcher, minRefresh time.Duration) *jwksCache {
-	return &jwksCache{fetch: fetch, minRefresh: minRefresh, keys: map[string]jwksKey{}}
+func newJWKSCache(fetch jwksFetcher, minRefresh time.Duration, logger *zap.Logger) *jwksCache {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	return &jwksCache{fetch: fetch, minRefresh: minRefresh, logger: logger, keys: map[string]jwksKey{}}
 }
 
 // keyFor resolves the verification key(s) for a token header.
@@ -134,18 +140,26 @@ func (c *jwksCache) refresh(ctx context.Context) error {
 
 	raw, err := c.fetch(ctx)
 	if err != nil {
+		// Log, not just count: a fetch failure was previously visible only as
+		// a climbing auth_rejections{reason="jwks_unavailable"} metric with no
+		// cause, which made a wrong Accept header (406) look like a mystery
+		// unknown_kid. The underlying error names the real problem.
+		c.logger.Warn("tenantauth: JWKS refresh failed", zap.Error(err))
 		return fmt.Errorf("%w: %w", errJWKSUnavailable, err)
 	}
 	keys, err := parseJWKS(raw)
 	if err != nil {
+		c.logger.Warn("tenantauth: JWKS parse failed", zap.Error(err))
 		return fmt.Errorf("%w: %w", errJWKSUnavailable, err)
 	}
 	if len(keys) == 0 {
+		c.logger.Warn("tenantauth: JWKS contained no usable keys")
 		return errNoKeys
 	}
 	c.mu.Lock()
 	c.keys = keys
 	c.mu.Unlock()
+	c.logger.Debug("tenantauth: JWKS refreshed", zap.Int("keys", len(keys)))
 	return nil
 }
 

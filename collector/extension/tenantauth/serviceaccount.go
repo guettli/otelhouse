@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
+	"go.uber.org/zap"
 )
 
 // saIdentity is the ServiceAccount a verified projected token belongs to.
@@ -39,7 +40,7 @@ type serviceAccountVerifier struct {
 	namespaces map[string]struct{}
 }
 
-func newServiceAccountVerifier(cfg *ServiceAccountConfig) (*serviceAccountVerifier, error) {
+func newServiceAccountVerifier(cfg *ServiceAccountConfig, logger *zap.Logger) (*serviceAccountVerifier, error) {
 	fetch := cfg.fetchJWKS
 	if fetch == nil {
 		var err error
@@ -62,7 +63,7 @@ func newServiceAccountVerifier(cfg *ServiceAccountConfig) (*serviceAccountVerifi
 	}
 	return &serviceAccountVerifier{
 		cfg:  cfg,
-		keys: newJWKSCache(fetch, cfg.minRefreshInterval()),
+		keys: newJWKSCache(fetch, cfg.minRefreshInterval(), logger),
 		parser: jwt.NewParser(
 			// Pin the algorithms: refuses `alg:none` and blocks HS↔RS/ES
 			// confusion. HS* can never appear here — validate() rejects it

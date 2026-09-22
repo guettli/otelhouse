@@ -126,7 +126,7 @@ func newAuth(t *testing.T, km keyMaterial) *tenantAuth {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("cfg.Validate: %v", err)
 	}
-	a, err := newTenantAuth(cfg, nil)
+	a, err := newTenantAuth(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("newTenantAuth: %v", err)
 	}
@@ -639,7 +639,7 @@ func newSAFixture(t *testing.T, alg string, tweak func(c *Config)) saFixture {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("cfg.Validate: %v", err)
 	}
-	a, err := newTenantAuth(cfg, mp)
+	a, err := newTenantAuth(cfg, mp, nil)
 	if err != nil {
 		t.Fatalf("newTenantAuth: %v", err)
 	}
@@ -1086,7 +1086,7 @@ func TestSA_JWKSOverHTTPS(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("cfg.Validate: %v", err)
 	}
-	a, err := newTenantAuth(cfg, nil)
+	a, err := newTenantAuth(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("newTenantAuth: %v", err)
 	}
@@ -1160,7 +1160,7 @@ func TestSA_JWKSOverHTTPS_UntrustedCA(t *testing.T) {
 		Algorithms:        []string{"RS256"},
 		NamespaceAsTenant: true,
 	}}
-	a, err := newTenantAuth(cfg, nil)
+	a, err := newTenantAuth(cfg, nil, nil)
 	if err != nil {
 		t.Fatalf("newTenantAuth: %v", err)
 	}

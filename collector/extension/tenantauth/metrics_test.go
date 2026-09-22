@@ -31,7 +31,7 @@ func newTestAuthWithMeter(t *testing.T, km keyMaterial) (*tenantAuth, *sdkmetric
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("cfg.Validate: %v", err)
 	}
-	a, err := newTenantAuth(cfg, mp)
+	a, err := newTenantAuth(cfg, mp, nil)
 	if err != nil {
 		t.Fatalf("newTenantAuth: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestMetrics_NoOpMeterProvider(t *testing.T) {
 		Algorithm:    km.alg,
 		PublicKeyPEM: string(km.pubPEM),
 		TenantClaim:  defaultTenantClaim,
-	}, metric.MeterProvider(nil))
+	}, metric.MeterProvider(nil), nil)
 	if err != nil {
 		t.Fatalf("newTenantAuth: %v", err)
 	}
