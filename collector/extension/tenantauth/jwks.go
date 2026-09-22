@@ -328,7 +328,13 @@ func newHTTPJWKSFetcher(cfg *ServiceAccountConfig) (jwksFetcher, error) {
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("Accept", "application/json")
+		// The Kubernetes /openid/v1/jwks endpoint serves the RFC 7517 media
+		// type application/jwk-set+json and rejects a bare application/json
+		// Accept with 406 Not Acceptable — which surfaced only as an empty key
+		// cache and unknown_kid rejections, because the fetch error is not
+		// logged. Ask for the JWKS media type first, with application/json as a
+		// fallback for any server that serves plain JSON.
+		req.Header.Set("Accept", "application/jwk-set+json, application/json")
 		if tokenFile != noTokenFile {
 			token, err := os.ReadFile(tokenFile)
 			if err != nil {
