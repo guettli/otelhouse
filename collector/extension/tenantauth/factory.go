@@ -46,5 +46,5 @@ func createDefaultConfig() component.Config {
 }
 
 func createExtension(_ context.Context, set extension.Settings, cfg component.Config) (extension.Extension, error) {
-	return newTenantAuth(cfg.(*Config), set.MeterProvider)
+	return newTenantAuth(cfg.(*Config), set.MeterProvider, set.Logger)
 }

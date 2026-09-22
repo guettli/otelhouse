@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/extension/auth"
 	"go.opentelemetry.io/otel/metric"
+	"go.uber.org/zap"
 )
 
 // rejection is a verifier's "no", carrying the operator-visible reason
@@ -54,10 +55,13 @@ type tenantAuth struct {
 // MeterProvider is supplied by the collector via extension.Settings; a nil
 // provider is treated as no-op so bare unit tests do not need to wire an
 // SDK through.
-func newTenantAuth(cfg *Config, mp metric.MeterProvider) (*tenantAuth, error) {
+func newTenantAuth(cfg *Config, mp metric.MeterProvider, logger *zap.Logger) (*tenantAuth, error) {
 	m, err := newAuthMetrics(mp)
 	if err != nil {
 		return nil, err
+	}
+	if logger == nil {
+		logger = zap.NewNop()
 	}
 	t := &tenantAuth{cfg: cfg, claim: cfg.tenantClaim(), metrics: m}
 
@@ -66,7 +70,7 @@ func newTenantAuth(cfg *Config, mp metric.MeterProvider) (*tenantAuth, error) {
 	// themselves. The static-PEM source is the documented fallback for
 	// producers that are not in-cluster pods.
 	if cfg.saEnabled() {
-		sa, err := newServiceAccountVerifier(cfg.ServiceAccount)
+		sa, err := newServiceAccountVerifier(cfg.ServiceAccount, logger)
 		if err != nil {
 			return nil, err
 		}
