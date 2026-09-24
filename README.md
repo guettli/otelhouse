@@ -384,7 +384,43 @@ recommend managing your own schema with `create_schema: false` for production
 workloads, and note that any table shape works as long as the column names and
 types still match the exporter's `INSERT`.
 
-**The escape hatch**, if per-tenant read latency ever becomes the bottleneck:
+### First, rule out the analyzer bug ([ClickHouse#82369](https://github.com/ClickHouse/ClickHouse/issues/82369))
+
+The read amplification above is the schema's *inherent* cost and grows with
+tenant count. There is a separate, far more acute failure that is **not** about
+tenant count and is **not** a schema problem — check for it before reaching for
+the escape hatch below.
+
+With ClickHouse's **new analyzer** (the default since 24.x), a **row policy**
+makes the planner ignore data-skipping indexes *and* partition pruning
+entirely. This is worse than the "bloom prunes only some granules" case above:
+a trace-id point lookup that `idx_trace_id` prunes to **zero granules in
+`EXPLAIN`** instead **full-scans the whole table at execution**. On a
+memory-tight ClickHouse one such cold query runs past the query time limit
+before it is reaped, backs the exporter's `INSERT`s up behind it, and fails the
+liveness probe — a single `/ci/<traceID>`-style read can OOM-restart the shared
+server and drop spans for **every** tenant. Isolation stays correct; it is
+availability that breaks.
+
+Because it is the row-policy machinery (not the Map lookup) that trips the bug,
+neither a materialized-column policy nor a plain-column policy avoids it — but
+the **old analyzer** does. The fix is one setting on the tenant read profile,
+no schema change:
+
+```sql
+ALTER SETTINGS PROFILE tenant_ro SETTINGS enable_analyzer = 0;
+```
+
+Verified on 25.8.33.6 against a live `<tenant>_ro` row policy, fully cold: the
+trace-id lookup drops from a 30 s timeout to ~20 ms, same rows, isolation
+intact. otelhouse's bootstrap sets this on the `tenant_ro` profile; ad-hoc
+readers can pass it per-connection via the DSN (`…/otel?enable_analyzer=0`).
+Revisit when #82369 is fixed upstream (the old analyzer is deprecated, so a
+future ClickHouse image that drops it will reject this setting — remove the line
+in the same bump).
+
+**The escape hatch**, if per-tenant read latency ever becomes the bottleneck
+*after* the analyzer bug is ruled out:
 set `create_schema: false` and create the `otel_*` tables yourself with the
 tenant lifted out of the map — a tenant-leading `ORDER BY`, a projection, or a
 tenant-leading data-skipping index — keeping the columns compatible with the
