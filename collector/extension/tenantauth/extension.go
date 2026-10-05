@@ -10,7 +10,8 @@ import (
 
 	"go.opentelemetry.io/collector/client"
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/extension/auth"
+	"go.opentelemetry.io/collector/extension"
+	"go.opentelemetry.io/collector/extension/extensionauth"
 	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
 )
@@ -35,7 +36,7 @@ type verifier interface {
 	verify(ctx context.Context, token string) (string, *rejection)
 }
 
-// tenantAuth is the auth.Server implementation. It verifies the request's
+// tenantAuth is the extensionauth.Server implementation. It verifies the request's
 // Bearer token against every configured identity source (Kubernetes
 // ServiceAccount tokens first, then static-PEM minted JWTs) and puts the
 // resolved tenant into the request's client.Info so the tenanttagger
@@ -270,8 +271,11 @@ func (d tenantAuthData) GetAttributeNames() []string { return []string{d.claim} 
 
 // compile-time interface checks.
 var (
-	_ auth.Server     = (*tenantAuth)(nil)
-	_ client.AuthData = tenantAuthData{}
-	_ verifier        = (*staticVerifier)(nil)
-	_ verifier        = (*serviceAccountVerifier)(nil)
+	_ extensionauth.Server = (*tenantAuth)(nil)
+	// extensionauth.Server stopped embedding extension.Extension in v1.x, so the
+	// assertion above no longer proves Start/Shutdown exist. Assert it directly.
+	_ extension.Extension = (*tenantAuth)(nil)
+	_ client.AuthData     = tenantAuthData{}
+	_ verifier            = (*staticVerifier)(nil)
+	_ verifier            = (*serviceAccountVerifier)(nil)
 )

@@ -1,7 +1,7 @@
 # OpenTelemetry Collector Builder configuration for the otelhouse
 # multi-tenant OTLP gateway.
 #
-# ocb (`go install go.opentelemetry.io/collector/cmd/builder@v0.114.0`) reads
+# ocb (`go install go.opentelemetry.io/collector/cmd/builder@v0.161.0`) reads
 # this file and generates a Go main.go that imports every component below,
 # then runs `go build` to produce a single binary. The result is a
 # purpose-built distribution — no upstream distro (otelcol-contrib) is used
@@ -33,10 +33,57 @@ dist:
 #
 # The clickhouseexporter version below is the schema source of truth.
 #
-# NOTE: there is currently NO schema-drift guardrail. Nothing in CI asserts
-# that the tables this exporter creates still look the way we expect, so a
-# bump here can change the ClickHouse schema silently. If you bump it, check
-# the resulting schema by hand.
+# NOTE: there is still NO schema-drift guardrail in CI. Nothing asserts that
+# the tables this exporter creates look the way we expect, so a bump here can
+# change the ClickHouse schema silently. If you bump it, check the resulting
+# schema by hand -- and note that the 0.114 -> 0.161 bump DID change it.
+#
+# What the 0.114 -> 0.161 check found, by booting this binary against a
+# throwaway ClickHouse 26.8 and diffing against the live tables:
+#
+#   otel_traces: columns and keys unchanged (22 columns, sorting key
+#     ServiceName/SpanName/toDateTime(Timestamp), partition toDate(Timestamp))
+#     -- but the TTL EXPRESSION changed, toDate(Timestamp) ->
+#     toDateTime(Timestamp), same on otel_traces_trace_id_ts. So "no drift" is
+#     wrong; it is "no drift in the parts that affect queries".
+#
+#   otel_logs: changed substantially.
+#     columns      16 -> 24
+#     gone         TimestampTime
+#     added        EventName, plus 8 __otel_materialized_* columns (7x k8s.*
+#                  and deployment.environment.name)
+#     sorting key  ServiceName, TimestampTime, Timestamp
+#             ->   toStartOfFiveMinutes(Timestamp), ServiceName, Timestamp
+#     partition    toDate(TimestampTime) -> toDate(Timestamp)
+#
+# It is not a blocking break, but NOT for the reason first written here. It is
+# not CREATE TABLE IF NOT EXISTS that saves us -- a fixed 24-column INSERT
+# against a 16-column table would fail regardless. 0.161 added runtime
+# introspection: detectSchemaFeatures runs DESC TABLE at startup and
+# renderInsertLogsSQL appends EventName only when that column exists. Verified
+# end to end: the live 16-column DDL was planted on a throwaway, this binary
+# inserted an OTLP log record through it, the row landed with correct
+# ServiceName/SeverityText/Body, and query_log shows zero ALTER or DROP.
+# INSERTs are fully named in both versions, never positional, so reordered
+# columns cannot corrupt data.
+#
+# Consequences worth knowing:
+#   - the deployed tables keep the OLD shape, so none of the new columns or the
+#     five-minute-bucket sorting key arrive without a deliberate migration.
+#   - EventName is SILENTLY DISCARDED when writing into the old-shaped table.
+#     Nothing uses it today, but it is a quiet drop, not a loud failure.
+#   - if otel_logs is ever dropped and recreated, it returns with the NEW shape
+#     AND, on ClickHouse >= 26.2, completely different skip indexes: the
+#     exporter branches on db.ServerVersion() and emits experimental TEXT
+#     indexes instead of bloom filters, renames idx_body to
+#     idx_lower_body lower(Body), and moves GRANULARITY from 8 to 100000000.
+#     That invalidates the row-policy query performance measured against the
+#     old key and bloom filters (gitops#676), and it means any future
+#     schema-drift guardrail MUST pin the ClickHouse version or it will flap.
+#
+# Beware when testing this by hand: ttl is 720h and the TTL expression is on
+# the timestamp column, so an OTLP record with an old timeUnixNano is dropped
+# at insert and looks exactly like a silent exporter failure.
 extensions:
   - gomod: github.com/guettli/otelhouse/collector/extension/tenantauth v0.1.0
   # pprof, so Parca can scrape heap/goroutine/mutex/block from the gateway.
@@ -48,25 +95,36 @@ extensions:
   # a config-only change crash-loops this custom distribution
   # (unknown type: "pprof") and took tc ingest down once already
   # (gitops#237, reverted by gitops#240).
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/pprofextension v0.114.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/pprofextension v0.161.0
 
 processors:
-  - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.114.0
-  - gomod: go.opentelemetry.io/collector/processor/memorylimiterprocessor v0.114.0
+  - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.161.0
+  - gomod: go.opentelemetry.io/collector/processor/memorylimiterprocessor v0.161.0
   # Stock transform processor (OTTL), pulled in unmodified. It is the codeless
-  # secret-redaction stage (#46): the runtime config loads the gitleaks-derived
-  # OTTL statements from collector/redaction.yaml into a `transform/redaction`
-  # instance ahead of `batch`. Only the rule pack is generated; the component
-  # is stock, so this stays consistent with "stock components only".
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/transformprocessor v0.114.0
+  # secret-redaction stage (#46): the gitleaks-derived OTTL statements in
+  # collector/redaction.yaml load into a `transform/redaction` instance. Only
+  # the rule pack is generated; the component is stock, so this stays
+  # consistent with "stock components only".
+  #
+  # NB `transform/redaction` is currently only wired up in the CI harness --
+  # the deployed pipeline is [tenanttagger, tenantratelimit, memory_limiter,
+  # batch], with no redaction stage. Pre-existing, but worth not misreading.
+  #
+  # All 695 statements re-parse on 0.161 (validated against the built distro,
+  # with a deliberately broken statement as a negative control). Only
+  # replace_pattern and replace_all_patterns are used, both unchanged. Note
+  # 0.161 flips the transform processor's default error_mode from propagate to
+  # ignore; redaction.yaml sets it explicitly, but a future transform instance
+  # that does not would swallow errors.
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/transformprocessor v0.161.0
   - gomod: github.com/guettli/otelhouse/collector/processor/tenanttagger v0.1.0
   - gomod: github.com/guettli/otelhouse/collector/processor/tenantratelimit v0.1.0
 
 receivers:
-  - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.114.0
+  - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.161.0
 
 exporters:
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/clickhouseexporter v0.114.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/exporter/clickhouseexporter v0.161.0
 
 # Local replaces point ocb at this checkout's copies of the custom
 # components — until a v0.1.0 tag is published, the module proxy has no
