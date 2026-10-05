@@ -249,8 +249,15 @@ func TestAuthenticate_Expired(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected expired-token error")
 	}
-	if !strings.Contains(err.Error(), "expired") && !errors.Is(err, jwt.ErrTokenExpired) {
-		t.Fatalf("expected 'expired' error, got %v", err)
+	// The error returned to the CALLER is deliberately opaque -- confighttp
+	// puts it in the 401 body, so it must not reveal why. The reason lives in
+	// the log and the authRejections metric instead, so assert on the contract
+	// that matters here: rejected, and told nothing.
+	if !errors.Is(err, errUnauthenticated) {
+		t.Fatalf("expected errUnauthenticated, got %v", err)
+	}
+	if strings.Contains(err.Error(), "expired") {
+		t.Fatalf("the caller-facing error leaked the reason: %v", err)
 	}
 }
 
