@@ -11,7 +11,7 @@ import (
 
 // Pinned upstream OTel Collector contrib image. Drives the schema the
 // clickhouseexporter creates on first insert; bump when the schema changes.
-const otelCollectorVersion = "0.114.0"
+const otelCollectorVersion = "0.161.0"
 
 // ClickHouse credentials used by every component in the harness (the
 // ClickHouse server itself, the collector's exporter, and the e2e container,
