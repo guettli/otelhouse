@@ -49,7 +49,24 @@ type tenantAuth struct {
 	verifiers []verifier
 	claim     string
 	metrics   *authMetrics
+	logger    *zap.Logger
 }
+
+// errUnauthenticated is the ONLY error Authenticate returns to a caller.
+//
+// It exists because confighttp (since the 0.161 collector) puts err.Error()
+// straight into the 401 response body, where 0.114 returned a generic status
+// string. Returning the real reason there hands an unauthenticated caller a
+// verification oracle and, worse, leaks tenancy topology: this package's
+// errors otherwise name the rejected ServiceAccount and namespace, say whether
+// one is absent from tenant_map, and include the cluster JWKS URL. gRPC has
+// always behaved this way, so this is not only about the HTTP change.
+//
+// The detail is not lost, it moves: every rejection is logged at Warn with its
+// reason and the underlying error, and the existing authRejections metric
+// already counts by reason. Operators keep full fidelity; callers learn only
+// that they are not authenticated.
+var errUnauthenticated = errors.New("unauthenticated")
 
 // newTenantAuth is exposed to the factory. Key material is parsed once at
 // construction time so runtime auth calls are pure verifies. The
@@ -64,7 +81,7 @@ func newTenantAuth(cfg *Config, mp metric.MeterProvider, logger *zap.Logger) (*t
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	t := &tenantAuth{cfg: cfg, claim: cfg.tenantClaim(), metrics: m}
+	t := &tenantAuth{cfg: cfg, claim: cfg.tenantClaim(), metrics: m, logger: logger}
 
 	// Order matters: the ServiceAccount source is tried first, because
 	// in-cluster producers are the default and their tokens rotate by
@@ -121,7 +138,8 @@ func (t *tenantAuth) Authenticate(ctx context.Context, sources map[string][]stri
 	token, err := extractBearer(sources)
 	if err != nil {
 		t.metrics.recordRejection(ctx, reasonMalformed)
-		return ctx, err
+		t.logRejection(reasonMalformed, err)
+		return ctx, errUnauthenticated
 	}
 
 	var worst *rejection
@@ -140,7 +158,21 @@ func (t *tenantAuth) Authenticate(ctx context.Context, sources map[string][]stri
 		}
 	}
 	t.metrics.recordRejection(ctx, worst.reason)
-	return ctx, worst.err
+	t.logRejection(worst.reason, worst.err)
+	return ctx, errUnauthenticated
+}
+
+// logRejection records why a request was refused. This is the ONLY place the
+// real reason surfaces, since Authenticate deliberately tells the caller
+// nothing (see errUnauthenticated). Nil-tolerant on purpose: tenantAuth is
+// constructed directly in unit tests, and the auth path must never panic
+// because a logger was not wired.
+func (t *tenantAuth) logRejection(reason string, err error) {
+	if t.logger == nil {
+		return
+	}
+	t.logger.Warn("tenantauth rejected a request",
+		zap.String("reason", reason), zap.Error(err))
 }
 
 // staticVerifier is the original identity source: a JWT minted elsewhere
