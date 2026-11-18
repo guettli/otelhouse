@@ -22,7 +22,7 @@ concurrency:
 env:
   # Keep in sync with dagger.io/dagger in ci/go.mod.
   # Used to pre-pull the engine image so a flaky registry doesn't fail CI.
-  DAGGER_ENGINE_VERSION: v0.21.7
+  DAGGER_ENGINE_VERSION: v1.0.0-beta.27
 
 jobs:
   ci:

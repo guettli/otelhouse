@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"dagger.io/dagger"
+	"dagger.io/dagger/core"
 )
 
 // gatewayImageRepo is the canonical registry path for the gateway image.
@@ -20,10 +20,10 @@ const gatewayImageRepo = "ghcr.io/guettli/otelhouse-gateway"
 // config is supplied at deploy time via a k8s ConfigMap (gitops#82) so no
 // tenant material is ever baked in.
 func buildGatewayImage(
-	client *dagger.Client,
-	src *dagger.Directory,
-	goMod, goBuild *dagger.CacheVolume,
-) *dagger.Container {
+	client *core.Query,
+	src *core.Directory,
+	goMod, goBuild *core.CacheVolume,
+) *core.Container {
 	builder := client.Container().
 		From("golang:1.26-alpine").
 		// ocb generates a Go program that pulls in the components listed
@@ -69,7 +69,7 @@ func buildGatewayImage(
 // builds the function is a no-op. When it should publish but the
 // registry credentials are missing, it fails loudly rather than
 // silently skipping.
-func publishGatewayImage(ctx context.Context, client *dagger.Client, ctr *dagger.Container) error {
+func publishGatewayImage(ctx context.Context, client *core.Query, ctr *core.Container) error {
 	ref := os.Getenv("GITHUB_REF")
 	event := os.Getenv("GITHUB_EVENT_NAME")
 	isMainPush := event == "push" && ref == "refs/heads/main"
