@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"dagger.io/dagger"
+	"dagger.io/dagger/core"
 )
 
 // Pinned upstream OTel Collector contrib image. Drives the schema the
@@ -32,16 +33,19 @@ func main() {
 }
 
 func pipeline(ctx context.Context) error {
-	client, err := dagger.Connect(ctx, dagger.WithLogOutput(os.Stderr))
+	conn, err := dagger.Connect(ctx, dagger.WithLogOutput(os.Stderr))
 	if err != nil {
 		return fmt.Errorf("dagger connect: %w", err)
 	}
-	defer func() { _ = client.Close() }()
+	defer func() { _ = conn.Close() }()
+	// Since v1.0 the generated API lives in dagger.io/dagger/core; the
+	// dagger.Client is only the connection.
+	client := core.NewQuery(conn)
 
 	// Mount the whole repo (minus .git/). The Go checks run from /src/ci
 	// where the only Go module lives; the harness reads the collector
 	// config from the same tree.
-	src := client.Host().Directory("..", dagger.HostDirectoryOpts{
+	src := client.Host().Directory("..", core.HostDirectoryOpts{
 		Exclude: []string{".git/"},
 	})
 
@@ -204,11 +208,11 @@ func pipeline(ctx context.Context) error {
 // `go test ./...` step already exercises successfully.
 func runE2E(
 	ctx context.Context,
-	client *dagger.Client,
-	clickhouse *dagger.Service,
+	client *core.Query,
+	clickhouse *core.Service,
 	clickhouseDSN string,
-	src *dagger.Directory,
-	goBase *dagger.Container,
+	src *core.Directory,
+	goBase *core.Container,
 ) error {
 	// Cap the whole e2e step. With everything inline this finishes in well
 	// under a minute; the deadline only exists so an unexpected hang turns

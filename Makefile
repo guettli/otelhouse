@@ -4,7 +4,7 @@
 # https://github.com/guettli/otelhouse/issues/33.
 #
 # The pipeline needs a reachable Dagger engine. Point the Dagger SDK at a
-# remote engine by exporting _EXPERIMENTAL_DAGGER_RUNNER_HOST before running;
+# remote engine by exporting DAGGER_ENGINE before running;
 # it is inherited by `go run` below.
 
 .PHONY: test ci

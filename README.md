@@ -449,7 +449,7 @@ The pipeline stands up its own ephemeral, version-pinned ClickHouse via
 a Dagger service binding — there is nothing to install or start by hand,
 and no separate local stack to keep in sync. A reachable Dagger engine
 is the only prerequisite; to use a remote engine, export
-`_EXPERIMENTAL_DAGGER_RUNNER_HOST` before running.
+`DAGGER_ENGINE` before running.
 
 There is intentionally **no** `docker-compose` (or other) parallel test
 environment: a second definition of ClickHouse would drift from
