@@ -40,3 +40,6 @@ go.work.sum
 # Normally produced inside the Dagger builder container, but a local
 # `builder --config=builder-config.yaml` writes it into the checkout.
 /collector/_build/
+
+# Written by the Dagger 1.0 CLI; not ours to pin.
+/dagger.lock
